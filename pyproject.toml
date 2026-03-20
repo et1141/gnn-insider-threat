@@ -1,0 +1,32 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "gnn-insider-threat"
+version = "0.1.0"
+description = "Deep Learning project for Insider Threat Detection using GCN and Bi-LSTM"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "torch",
+    "torch-geometric",
+    "pandas",
+    "scikit-learn",
+    "pyyaml",
+    "wandb",
+    "jupyter",
+    "matplotlib",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "ruff"
+]
+
+[tool.ruff]
+line-length = 100
+
+[tool.hatch.build.targets.wheel]
+packages = ["src"]
