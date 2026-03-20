@@ -13,6 +13,7 @@ dependencies = [
     "torch-geometric",
     "pandas",
     "scikit-learn",
+    "seaborn",
     "pyyaml",
     "wandb",
     "jupyter",
