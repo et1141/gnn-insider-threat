@@ -5,7 +5,7 @@ A PyTorch project for detecting insider threats using Graph Convolutional Networ
 ## Setup
 
 ```bash
-uv sync
+uv sync --extra dev
 ```
 
 ## Run Tests
