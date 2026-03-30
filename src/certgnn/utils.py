@@ -3,7 +3,7 @@ from pathlib import Path
 
 def get_project_root() -> Path:
     """ Return path to project root folder"""
-    return Path(__file__).resolve().parent.parent
+    return Path(__file__).resolve().parent.parent.parent
 
 def load_config():
     """Loads global config from YAML file."""
