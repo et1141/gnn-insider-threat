@@ -16,8 +16,15 @@ class ProcessFeature:
     Original: context/source_code/process_feature.py
     """
 
+    # Parse once at class level instead of on every call
+    _WORK_START = datetime.strptime("8:30", "%H:%M").time()
+    _WORK_END = datetime.strptime("17:30", "%H:%M").time()
+
     def __init__(self, user_df: pd.DataFrame):
         self.user_df = user_df
+        # Cache (own_pc, super_pc_or_None) per user_id to avoid repeated
+        # O(n) DataFrame scans — critical for large datasets.
+        self._pc_cache: dict = {}
 
     def process_url(self, urldata):
         if not isinstance(urldata, str):
@@ -93,7 +100,8 @@ class ProcessFeature:
             return type_count + type_size
         else:
             return [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
-
+    
+    # feature len 16
     def process_file_feature(self, row):
         to_rem = 1 if row["to_removable_media"] == True else 0  # noqa: E712
         f_rem = 1 if row["from_removable_media"] == True else 0  # noqa: E712
@@ -135,11 +143,9 @@ class ProcessFeature:
         weekno_d1 = dt.weekday()
         week = 0 if weekno_d1 < 5 else 1
 
-        wday_start = datetime.strptime("8:30", "%H:%M").time()
-        wday_end = datetime.strptime("17:30", "%H:%M").time()
         dt_date = dt.date()
-        d1_start = datetime.combine(dt_date, wday_start)
-        d1_end = datetime.combine(dt_date, wday_end)
+        d1_start = datetime.combine(dt_date, self._WORK_START)
+        d1_end = datetime.combine(dt_date, self._WORK_END)
         if dt < d1_start or dt > d1_end:
             if dt < d1_start:
                 diff = d1_start - dt
@@ -149,31 +155,33 @@ class ProcessFeature:
                 return diff.total_seconds() / 60, week
         return 0, week
 
+    def _get_user_pc_info(self, user_id):
+        """Return (own_pc, super_pc_or_None), cached per user_id."""
+        if user_id not in self._pc_cache:
+            try:
+                user_row = self.user_df.loc[self.user_df["user_id"] == user_id]
+                own_pc = user_row["pc"].iloc[0]
+                sup_name = user_row["supervisor"].iloc[0]
+                super_pc = self.user_df.loc[
+                    self.user_df["employee_name"] == sup_name
+                ]["pc"].iloc[0]
+                self._pc_cache[user_id] = (own_pc, super_pc)
+            except Exception:
+                own_pc = self.user_df.loc[
+                    self.user_df["user_id"] == user_id
+                ]["pc"].iloc[0]
+                self._pc_cache[user_id] = (own_pc, None)
+        return self._pc_cache[user_id]
+
     def pc_details(self, user_id, pc_acess):
-        try:
-            supervisor_name = self.user_df.loc[
-                self.user_df["user_id"] == user_id
-            ]["supervisor"].iloc[0]
-            super_pc = self.user_df.loc[
-                self.user_df["employee_name"] == supervisor_name
-            ]["pc"].iloc[0]
-            own_pc = self.user_df.loc[
-                self.user_df["user_id"] == user_id
-            ]["pc"].iloc[0]
-            if pc_acess == super_pc:
-                return own_pc, 1, 0
-            else:
-                if own_pc == pc_acess:
-                    return own_pc, 0, 0
-                else:
-                    return own_pc, 0, 1
-        except Exception:
-            own_pc = self.user_df.loc[
-                self.user_df["user_id"] == user_id
-            ]["pc"].iloc[0]
+        own_pc, super_pc = self._get_user_pc_info(user_id)
+        if super_pc is not None and pc_acess == super_pc:
+            return own_pc, 1, 0
+        else:
             if own_pc == pc_acess:
                 return own_pc, 0, 0
-            return own_pc, 0, 1
+            else:
+                return own_pc, 0, 1
 
 
 class GetFeature:

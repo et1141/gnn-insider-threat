@@ -351,21 +351,18 @@ def create_all_graphs(
     activity_types: dict,
     min_session_size: int,
     max_session_size: int,
-) -> list[Data]:
-    """Create graph training examples via activity masking.
-
-    For each user session (grouped by update_hour):
-    1. Split into sub-sessions of max_session_size
-    2. Merge sub-sessions smaller than min_session_size
-    3. For each activity position, mask it and create a training graph
-
-    Adapted from the source notebook's create_graph_list + get_graph_data.
-    """
+    processed_dir: Path,
+) -> int:
+    """Create graph training examples and save them in chunks to save RAM."""
     graph_list = []
-    users = combined["user"].unique()
-
-    for user in tqdm(users, desc="  Graphs"):
-        user_data = combined[combined["user_id"] == user]
+    chunk_idx = 0
+    total_graphs = 0
+    
+    processed_dir.mkdir(parents=True, exist_ok=True)
+    grouped_users = combined.groupby("user_id")
+    
+    for user, user_data in tqdm(grouped_users, total=len(grouped_users), desc="  Graphs"):
+        # note: user_data = combined[...] deleted to improve performance
 
         for session_hour in user_data["update_hour"].unique():
             sess = user_data[user_data["update_hour"] == session_hour].copy()
@@ -420,8 +417,20 @@ def create_all_graphs(
                         activity_types,
                     )
                     graph_list.append(graph)
+                    total_graphs += 1
 
-    return graph_list
+        # Chunking: save to memeory and clean RAM every 20k graphs
+        if len(graph_list) >= 20000:
+            torch.save(graph_list, processed_dir / f"graph_chunk_{chunk_idx}.pt")
+            chunk_idx += 1
+            graph_list.clear()
+
+    # Save remaining graphs
+    if graph_list:
+        torch.save(graph_list, processed_dir / f"graph_chunk_{chunk_idx}.pt")
+        graph_list.clear()
+
+    return total_graphs
 
 
 # ---------------------------------------------------------------------------
@@ -429,36 +438,34 @@ def create_all_graphs(
 # ---------------------------------------------------------------------------
 
 def save_processed(
-    graph_list: list,
+    total_graphs: int,
     processed_dir: Path,
     encoder: LabelEncoder,
     activity_types: dict,
 ):
-    """Save processed graph data, label encoder, and metadata."""
+    """Save metadata and label encoder."""
     processed_dir.mkdir(parents=True, exist_ok=True)
 
-    with open(processed_dir / "graph_list.pkl", "wb") as f:
-        pickle.dump(graph_list, f)
-
     metadata = {
-        "num_graphs": len(graph_list),
+        "num_graphs": total_graphs,
         "feature_dim": TOTAL_FEATURE_DIM,
         "num_activity_types": len(encoder.classes_),
         "num_classes": len(encoder.classes_) * 24,
         "activity_types": list(encoder.classes_),
         "activity_types_dict": {k: sorted(v) for k, v in activity_types.items()},
     }
+    
     with open(processed_dir / "metadata.pkl", "wb") as f:
         pickle.dump(metadata, f)
 
     with open(processed_dir / "label_encoder.pkl", "wb") as f:
         pickle.dump(encoder, f)
 
-    print(f"  {len(graph_list)} graphs -> {processed_dir / 'graph_list.pkl'}")
+    print(f"  Saved metadata to {processed_dir}")
     print(
         f"  Metadata: feature_dim={TOTAL_FEATURE_DIM}, "
         f"num_classes={metadata['num_classes']}, "
-        f"activity_types={metadata['activity_types']}",
+        f"total_graphs={total_graphs}"
     )
 
 
@@ -525,19 +532,15 @@ def main():
     combined = aggregate_features(combined)
 
     # 8. Graph creation
-    print("[8/8] Creating graphs...")
+    print("[8/8] Creating graphs (saving in chunks)...")
     act_types = build_activity_types_dict(combined)
-    graphs = create_all_graphs(combined, act_types, min_session, max_session)
-
+    total_graphs = create_all_graphs(combined, act_types, min_session, max_session, processed_dir)
+    
     # Save
-    print("Saving...")
-    save_processed(graphs, processed_dir, encoder, act_types)
-
-    n_mal = sum(1 for g in graphs if g.y_label.item() == 1)
-    print(
-        f"\nDone! {len(graphs)} graphs "
-        f"({n_mal} malicious, {len(graphs) - n_mal} normal)",
-    )
+    print("Saving metadata...")
+    save_processed(total_graphs, processed_dir, encoder, act_types)
+    
+    print(f"\nDone! Successfully created and saved {total_graphs} graphs.")
 
 
 if __name__ == "__main__":
