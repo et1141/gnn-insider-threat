@@ -1,11 +1,18 @@
 paths:
   raw_dir: "data/raw/cmu_cert_r5.2"
-  processed_dir: "data/processed"
+  processed_dir: "data/processed/r5.2"
   extract_dir: "data/raw/cmu_cert_r5.2/r5.2"
 
 # CMU CERT Dataset Article ID on Figshare
 download:
   article_id: "12841247"
-  target_files: 
+  target_files:
     - "r5.2.tar.bz2"
     - "answers.tar.bz2"
+
+preprocessing:
+  data_fraction: 0.01   # Fraction of users to include (0.0-1.0). Malicious users always included.
+  dataset_version: "5.2"
+  min_session_size: 5    # Minimum activities per session/sub-session
+  max_session_size: 50   # Maximum activities per sub-session before splitting
+  seed: 42

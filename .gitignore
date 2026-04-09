@@ -1,8 +1,20 @@
-data/
+data/**
+!data/processed/r5.2/*.dvc
 notes/
+context/
 .venv/
 __pycache__/
 .pytest_cache/
 .ruff_cache/
 *.pyc
 .DS_Store
+
+# DVC - local config and cache
+.dvc/config.local
+.dvc/tmp/
+.dvc/cache/
+
+client_secret*.json
+gdrive_client_secret*
+credentials.json
+token.json

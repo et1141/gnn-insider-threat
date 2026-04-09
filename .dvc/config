@@ -1,0 +1,6 @@
+[core]
+    remote = gdrive
+    autostage = true
+['remote "gdrive"']
+    url = gdrive://1ZhLa9dgc4iBPH7ec-FffjkMz05KP6uJq
+    gdrive_acknowledge_abuse = true

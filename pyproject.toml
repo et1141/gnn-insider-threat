@@ -1,7 +1,3 @@
-[build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
-
 [project]
 name = "gnn-insider-threat"
 version = "0.1.0"
@@ -9,27 +5,36 @@ description = "Deep Learning project for Insider Threat Detection using GCN and 
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-    "torch",
-    "torch-geometric",
     "pandas",
+    "numpy",
+    "torch",
+    "torch_geometric",
+    "pytorch-lightning",
     "scikit-learn",
-    "seaborn",
+    "tqdm",
     "pyyaml",
-    "wandb",
-    "jupyter",
-    "matplotlib",
     "requests",
-    "tqdm"
+    "matplotlib",
+    "jupyter",
+    "dvc[gdrive]",
 ]
 
 [project.optional-dependencies]
 dev = [
     "pytest",
-    "ruff"
+    "ruff",
+]
+experiment = [
+    "wandb",
 ]
 
-[tool.ruff]
-line-length = 100
+[project.scripts]
+preprocess = "certgnn.preprocess:main"
+download-data = "certgnn.download_data:download_dataset"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src"]
+packages = ["src/certgnn"]
