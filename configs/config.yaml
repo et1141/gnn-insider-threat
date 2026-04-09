@@ -1,6 +1,6 @@
 paths:
   raw_dir: "data/raw/cmu_cert_r5.2"
-  processed_dir: "data/processed"
+  processed_dir: "data/processed/r5.2"
   extract_dir: "data/raw/cmu_cert_r5.2/r5.2"
 
 # CMU CERT Dataset Article ID on Figshare

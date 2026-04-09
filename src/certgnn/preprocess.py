@@ -6,9 +6,11 @@ and saves processed data ready for training.
 Adapted from the source paper's 01_feature_extraction.ipynb.
 
 Usage:
-    uv run preprocess
+    uv run preprocess           # save chunks locally
+    uv run preprocess --stream  # push each chunk to GDrive and delete locally
 """
 
+import argparse
 import pickle
 import re
 from collections import defaultdict
@@ -352,15 +354,25 @@ def create_all_graphs(
     min_session_size: int,
     max_session_size: int,
     processed_dir: Path,
+    stream: bool = False,
 ) -> int:
-    """Create graph training examples and save them in chunks to save RAM."""
+    """Create graph training examples and save them in chunks to save RAM.
+
+    Args:
+        stream: If True, each chunk is pushed to GDrive via DvcChunkStore and
+                deleted locally immediately after saving. Requires DVC remote
+                to be configured and authenticated.
+    """
+    from certgnn.chunk_store import DvcChunkStore  # lazy import — not needed without --stream
+
     graph_list = []
     chunk_idx = 0
     total_graphs = 0
-    
+    store = DvcChunkStore(processed_dir) if stream else None
+
     processed_dir.mkdir(parents=True, exist_ok=True)
     grouped_users = combined.groupby("user_id")
-    
+
     for user, user_data in tqdm(grouped_users, total=len(grouped_users), desc="  Graphs"):
         # note: user_data = combined[...] deleted to improve performance
 
@@ -419,15 +431,21 @@ def create_all_graphs(
                     graph_list.append(graph)
                     total_graphs += 1
 
-        # Chunking: save to memeory and clean RAM every 20k graphs
+        # Flush chunk every 20k graphs
         if len(graph_list) >= 20000:
-            torch.save(graph_list, processed_dir / f"graph_chunk_{chunk_idx}.pt")
+            chunk_path = processed_dir / f"graph_chunk_{chunk_idx}.pt"
+            torch.save(graph_list, chunk_path)
+            if store is not None:
+                store.push_chunk(chunk_path, num_graphs=len(graph_list), delete_local=True)
             chunk_idx += 1
             graph_list.clear()
 
-    # Save remaining graphs
+    # Flush remaining graphs
     if graph_list:
-        torch.save(graph_list, processed_dir / f"graph_chunk_{chunk_idx}.pt")
+        chunk_path = processed_dir / f"graph_chunk_{chunk_idx}.pt"
+        torch.save(graph_list, chunk_path)
+        if store is not None:
+            store.push_chunk(chunk_path, num_graphs=len(graph_list), delete_local=True)
         graph_list.clear()
 
     return total_graphs
@@ -475,6 +493,14 @@ def save_processed(
 
 def main():
     """Run the full preprocessing pipeline."""
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--stream",
+        action="store_true",
+        help="Push each chunk to GDrive via DVC and delete it locally after saving.",
+    )
+    args = parser.parse_args()
+
     config = load_config()
     root = get_project_root()
 
@@ -532,14 +558,17 @@ def main():
     combined = aggregate_features(combined)
 
     # 8. Graph creation
-    print("[8/8] Creating graphs (saving in chunks)...")
+    stream_msg = " (streaming to GDrive)" if args.stream else ""
+    print(f"[8/8] Creating graphs (saving in chunks){stream_msg}...")
     act_types = build_activity_types_dict(combined)
-    total_graphs = create_all_graphs(combined, act_types, min_session, max_session, processed_dir)
-    
+    total_graphs = create_all_graphs(
+        combined, act_types, min_session, max_session, processed_dir, stream=args.stream,
+    )
+
     # Save
     print("Saving metadata...")
     save_processed(total_graphs, processed_dir, encoder, act_types)
-    
+
     print(f"\nDone! Successfully created and saved {total_graphs} graphs.")
 
 

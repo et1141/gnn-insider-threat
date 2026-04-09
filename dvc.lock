@@ -1,0 +1,57 @@
+schema: '2.0'
+stages:
+  download:
+    cmd: uv run download-data
+    deps:
+    - path: src/certgnn/download_data.py
+      hash: md5
+      md5: a000280c03277f625fa0fe7feccd7f34
+      size: 2048
+    params:
+      configs/config.yaml:
+        download:
+          article_id: '12841247'
+          target_files:
+          - r5.2.tar.bz2
+          - answers.tar.bz2
+        paths.raw_dir: data/raw/cmu_cert_r5.2
+    outs:
+    - path: data/raw
+      hash: md5
+      md5: 05bfc2b697653116c6afd22f67c1def6.dir
+      size: 51327836597
+      nfiles: 224
+  preprocess:
+    cmd: uv run preprocess
+    deps:
+    - path: data/raw
+      hash: md5
+      md5: 05bfc2b697653116c6afd22f67c1def6.dir
+      size: 51327836597
+      nfiles: 224
+    - path: src/certgnn/feature_extraction.py
+      hash: md5
+      md5: ae25bc245499951e607e16599e7ef786
+      size: 10208
+    - path: src/certgnn/preprocess.py
+      hash: md5
+      md5: b3f8f4feb6e54500b27d106b624682e5
+      size: 19063
+    params:
+      configs/config.yaml:
+        paths:
+          raw_dir: data/raw/cmu_cert_r5.2
+          processed_dir: data/processed
+          extract_dir: data/raw/cmu_cert_r5.2/r5.2
+        preprocessing:
+          data_fraction: 0.01
+          dataset_version: '5.2'
+          min_session_size: 5
+          max_session_size: 50
+          seed: 42
+    outs:
+    - path: data/processed
+      hash: md5
+      md5: eb007c14cd8b1c5484f27fae0d24e3e4.dir
+      size: 57954640499
+      nfiles: 31

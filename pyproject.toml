@@ -14,16 +14,15 @@ dependencies = [
     "tqdm",
     "pyyaml",
     "requests",
+    "matplotlib",
+    "jupyter",
+    "dvc[gdrive]",
 ]
 
 [project.optional-dependencies]
 dev = [
     "pytest",
     "ruff",
-]
-notebook = [
-    "jupyter",
-    "matplotlib",
 ]
 experiment = [
     "wandb",
