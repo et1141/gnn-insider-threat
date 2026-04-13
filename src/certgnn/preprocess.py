@@ -365,6 +365,10 @@ def create_all_graphs(
     """
     from certgnn.chunk_store import DvcChunkStore  # lazy import — not needed without --stream
 
+    # Keep chunks well under the 2 GB zip64 ceiling of torch.save. At ~55 KB
+    # per PyG Data object this yields ~550 MB files.
+    CHUNK_SIZE = 10_000
+
     graph_list = []
     chunk_idx = 0
     total_graphs = 0
@@ -372,6 +376,17 @@ def create_all_graphs(
 
     processed_dir.mkdir(parents=True, exist_ok=True)
     grouped_users = combined.groupby("user_id")
+
+    def _flush():
+        nonlocal chunk_idx
+        if not graph_list:
+            return
+        chunk_path = processed_dir / f"graph_chunk_{chunk_idx}.pt"
+        torch.save(graph_list, chunk_path)
+        if store is not None:
+            store.push_chunk(chunk_path, num_graphs=len(graph_list), delete_local=True)
+        chunk_idx += 1
+        graph_list.clear()
 
     for user, user_data in tqdm(grouped_users, total=len(grouped_users), desc="  Graphs"):
         # note: user_data = combined[...] deleted to improve performance
@@ -431,23 +446,12 @@ def create_all_graphs(
                     graph_list.append(graph)
                     total_graphs += 1
 
-        # Flush chunk every 20k graphs
-        if len(graph_list) >= 20000:
-            chunk_path = processed_dir / f"graph_chunk_{chunk_idx}.pt"
-            torch.save(graph_list, chunk_path)
-            if store is not None:
-                store.push_chunk(chunk_path, num_graphs=len(graph_list), delete_local=True)
-            chunk_idx += 1
-            graph_list.clear()
+                # Flush inside the session loop so a single high-activity
+                # user can't balloon a chunk past the 2 GB torch.save limit.
+                if len(graph_list) >= CHUNK_SIZE:
+                    _flush()
 
-    # Flush remaining graphs
-    if graph_list:
-        chunk_path = processed_dir / f"graph_chunk_{chunk_idx}.pt"
-        torch.save(graph_list, chunk_path)
-        if store is not None:
-            store.push_chunk(chunk_path, num_graphs=len(graph_list), delete_local=True)
-        graph_list.clear()
-
+    _flush()
     return total_graphs
 
 
