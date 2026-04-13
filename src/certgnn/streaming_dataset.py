@@ -35,13 +35,16 @@ class StreamingChunkDataset(Dataset):
         processed_dir: Path,
         max_local_chunks: int = 2,
         delete_after_eviction: bool = True,
+        chunk_names: list[str] | None = None,
     ):
         self.processed_dir = Path(processed_dir)
         self.store = DvcChunkStore(self.processed_dir)
         self.max_local_chunks = max_local_chunks
         self.delete_after_eviction = delete_after_eviction
 
-        self.chunk_names = self.store.list_chunks()
+        available_chunks = self.store.list_chunks()
+        self.chunk_names = chunk_names or available_chunks
+        self.chunk_names = [name for name in self.chunk_names if name in available_chunks]
         if not self.chunk_names:
             raise ValueError(
                 "Manifest is empty — no chunks found. "

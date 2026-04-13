@@ -14,6 +14,17 @@ uv sync --extra dev
 uv run pytest
 ```
 
+## Baseline training
+
+The baseline uses split-aware processed graph chunks and a lightweight graph pooling + MLP model.
+
+```bash
+uv run preprocess
+uv run train-baseline
+```
+
+The training command logs to Weights & Biases in offline mode by default and writes summary metrics to `reports/baseline/metrics.json`.
+
 ## Lint
 
 ```bash

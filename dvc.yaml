@@ -24,3 +24,24 @@ stages:
           - preprocessing
           - paths
     # processed chunks are streamed to GDrive via DvcChunkStore — no outs here
+
+  train_baseline:
+    cmd: uv run train-baseline
+    deps:
+      - src/certgnn/baseline/__init__.py
+      - src/certgnn/baseline/data.py
+      - src/certgnn/baseline/lightning.py
+      - src/certgnn/baseline/model.py
+      - src/certgnn/baseline/split.py
+      - src/certgnn/baseline/train.py
+      - src/certgnn/streaming_dataset.py
+      - src/certgnn/chunk_store.py
+      - src/certgnn/utils.py
+      - configs/chunks_manifest.json
+      - data/processed/r5.2
+    params:
+      - configs/config.yaml:
+          - baseline
+          - paths.processed_dir
+    outs:
+      - reports/baseline/metrics.json

@@ -1,0 +1,31 @@
+{
+  "chunks": {
+    "train_graph_chunk_0.pt": 49615,
+    "train_graph_chunk_1.pt": 76115,
+    "val_graph_chunk_0.pt": 43606,
+    "train_graph_chunk_2.pt": 72123,
+    "train_graph_chunk_3.pt": 43998,
+    "train_graph_chunk_4.pt": 65333,
+    "val_graph_chunk_1.pt": 51093,
+    "test_graph_chunk_0.pt": 78318,
+    "train_graph_chunk_5.pt": 29700,
+    "train_graph_chunk_6.pt": 51984,
+    "test_graph_chunk_1.pt": 33007,
+    "train_graph_chunk_7.pt": 86994,
+    "train_graph_chunk_8.pt": 33270,
+    "train_graph_chunk_9.pt": 41265,
+    "test_graph_chunk_2.pt": 43618,
+    "train_graph_chunk_10.pt": 46400,
+    "val_graph_chunk_2.pt": 49964,
+    "test_graph_chunk_3.pt": 44887,
+    "train_graph_chunk_11.pt": 61333,
+    "train_graph_chunk_12.pt": 35073,
+    "train_graph_chunk_13.pt": 76695,
+    "test_graph_chunk_4.pt": 28474,
+    "train_graph_chunk_14.pt": 60303,
+    "train_graph_chunk_15.pt": 62651,
+    "val_graph_chunk_3.pt": 44976,
+    "train_graph_chunk_16.pt": 45220,
+    "val_graph_chunk_4.pt": 6368
+  }
+}

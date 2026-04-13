@@ -23,6 +23,7 @@ from sklearn.preprocessing import LabelEncoder
 from torch_geometric.data import Data
 from tqdm import tqdm
 
+from certgnn.baseline.split import build_user_splits, save_user_split_manifest
 from certgnn.feature_extraction import GetFeature
 from certgnn.utils import get_project_root, load_config
 
@@ -86,35 +87,161 @@ def collect_malicious_ids(answers_dir: Path, dataset_version: str) -> set:
 # Step 3: User selection
 # ---------------------------------------------------------------------------
 
+# def select_users(
+#     extract_dir: Path,
+#     answers_dir: Path,
+#     dataset_version: str,
+#     data_fraction: float,
+#     seed: int = 42,
+# ) -> set | None:
+#     """Select a subset of users. Malicious users are always included."""
+#     if data_fraction >= 1.0:
+#         return None
+
+#     rng = np.random.RandomState(seed)
+#     all_users = set(
+#         pd.read_csv(extract_dir / "logon.csv", usecols=["user"])["user"].unique(),
+#     )
+#     insiders = pd.read_csv(answers_dir / "insiders.csv")
+#     mal_users = set(
+#         insiders[
+#             insiders["dataset"].astype(str).str.startswith(dataset_version)
+#         ]["user"].unique(),
+#     )
+#     non_mal = sorted(all_users - mal_users)
+#     n = max(1, int(len(non_mal) * data_fraction))
+#     sampled = set(rng.choice(non_mal, size=n, replace=False))
+#     selected = sampled | mal_users
+#     print(f"  {len(selected)} users: {len(mal_users)} malicious + {len(sampled)} non-malicious")
+#     return selected
+
 def select_users(
     extract_dir: Path,
     answers_dir: Path,
     dataset_version: str,
-    data_fraction: float,
+    normal_user_fraction: float,
+    malicious_user_fraction: float = 1.0,
+    balance_malicious_by_scenario: bool = False,
+    strict_equal_scenarios: bool = True,
     seed: int = 42,
 ) -> set | None:
-    """Select a subset of users. Malicious users are always included."""
-    if data_fraction >= 1.0:
-        return None
+    """
+    Select users with separate fractions for normal and malicious users.
+
+    If balance_malicious_by_scenario=True, malicious users are sampled equally
+    from each scenario (for CERT 5.2 typically scenarios 1..4).
+    """
+    if not (0.0 <= normal_user_fraction <= 1.0):
+        raise ValueError("normal_user_fraction must be in [0.0, 1.0]")
+    if not (0.0 <= malicious_user_fraction <= 1.0):
+        raise ValueError("malicious_user_fraction must be in [0.0, 1.0]")
 
     rng = np.random.RandomState(seed)
+
     all_users = set(
-        pd.read_csv(extract_dir / "logon.csv", usecols=["user"])["user"].unique(),
+        pd.read_csv(extract_dir / "logon.csv", usecols=["user"])["user"].unique()
     )
+
     insiders = pd.read_csv(answers_dir / "insiders.csv")
-    mal_users = set(
-        insiders[
-            insiders["dataset"].astype(str).str.startswith(dataset_version)
-        ]["user"].unique(),
+    insiders = insiders[
+        insiders["dataset"].astype(str).str.startswith(str(dataset_version))
+    ].copy()
+
+    # Keep only users that exist in logon data
+    insiders = insiders[insiders["user"].isin(all_users)].copy()
+
+    # Build malicious pools
+    mal_users_all = set(insiders["user"].unique())
+    non_mal = sorted(all_users - mal_users_all)
+
+    # ---------------------------
+    # Sample normal users
+    # ---------------------------
+    if normal_user_fraction == 0.0:
+        sampled_non_mal = set()
+    elif normal_user_fraction >= 1.0:
+        sampled_non_mal = set(non_mal)
+    else:
+        n_non = int(len(non_mal) * normal_user_fraction)
+        if n_non == 0 and len(non_mal) > 0:
+            n_non = 1
+        sampled_non_mal = set(rng.choice(non_mal, size=n_non, replace=False))
+
+    # ---------------------------
+    # Sample malicious users
+    # ---------------------------
+    sampled_mal = set()
+
+    if malicious_user_fraction == 0.0 or len(mal_users_all) == 0:
+        sampled_mal = set()
+
+    elif malicious_user_fraction >= 1.0 and not balance_malicious_by_scenario:
+        sampled_mal = set(mal_users_all)
+
+    elif not balance_malicious_by_scenario:
+        mal_list = sorted(mal_users_all)
+        n_mal = int(len(mal_list) * malicious_user_fraction)
+        if n_mal == 0 and len(mal_list) > 0:
+            n_mal = 1
+        sampled_mal = set(rng.choice(mal_list, size=n_mal, replace=False))
+
+    else:
+        # Equal-per-scenario malicious sampling
+        # No "remainder" distribution -> keeps exact equality across scenarios.
+        scenario_users = {}
+        for scenario, g in insiders.groupby(insiders["scenario"].astype(str)):
+            users = sorted(set(g["user"]))
+            if len(users) > 0:
+                scenario_users[scenario] = users
+
+        if not scenario_users:
+            sampled_mal = set()
+        else:
+            n_scen = len(scenario_users)
+            target_total_mal = int(len(mal_users_all) * malicious_user_fraction)
+            if target_total_mal == 0 and malicious_user_fraction > 0:
+                target_total_mal = 1
+
+            per_scen = target_total_mal // n_scen
+
+            if per_scen == 0 and target_total_mal > 0:
+                if strict_equal_scenarios:
+                    raise ValueError(
+                        "malicious_user_fraction too small for equal-per-scenario sampling. "
+                        "Increase malicious_user_fraction."
+                    )
+                # fallback: take 1 from as many scenarios as possible
+                per_scen = 1
+
+            sampled = set()
+            for scenario, users in sorted(scenario_users.items(), key=lambda x: x[0]):
+                if strict_equal_scenarios and len(users) < per_scen:
+                    raise ValueError(
+                        f"Scenario {scenario} has only {len(users)} users, "
+                        f"cannot sample {per_scen} equally from all scenarios."
+                    )
+                take = min(per_scen, len(users))
+                if take > 0:
+                    picked = rng.choice(users, size=take, replace=False)
+                    sampled.update(picked)
+
+            sampled_mal = sampled
+
+    selected = sampled_non_mal | sampled_mal
+
+    # Keep old behavior optimization: no filtering when all users selected
+    if len(selected) == len(all_users):
+        print(
+            "  User selection disabled effectively: all users selected "
+            f"({len(all_users)} total)."
+        )
+        return None
+
+    print(
+        f"  Selected users: total={len(selected)} | "
+        f"malicious={len(sampled_mal)} | non-malicious={len(sampled_non_mal)}"
     )
-    non_mal = sorted(all_users - mal_users)
-    n = max(1, int(len(non_mal) * data_fraction))
-    sampled = set(rng.choice(non_mal, size=n, replace=False))
-    selected = sampled | mal_users
-    print(f"  {len(selected)} users: {len(mal_users)} malicious + {len(sampled)} non-malicious")
     return selected
-
-
 # ---------------------------------------------------------------------------
 # Step 4: Load raw sessions
 # ---------------------------------------------------------------------------
@@ -305,7 +432,15 @@ def build_activity_types_dict(combined: pd.DataFrame) -> dict[str, set]:
     }
 
 
-def _create_graph(sequence, masked_activity, masked_label, features_dict, activity_types):
+def _create_graph(
+    sequence,
+    masked_activity,
+    masked_label,
+    features_dict,
+    activity_types,
+    user_id: str,
+    split_name: str,
+):
     """Create a PyG Data object from a masked activity session.
 
     Edges:
@@ -345,6 +480,8 @@ def _create_graph(sequence, masked_activity, masked_label, features_dict, activi
     data = Data(x=feature_matrix, edge_index=edge_index)
     data.y_act = torch.tensor(masked_activity, dtype=torch.long)
     data.y_label = torch.tensor(masked_label, dtype=torch.long)
+    data.user_id = user_id
+    data.split = split_name
     return data
 
 
@@ -354,6 +491,7 @@ def create_all_graphs(
     min_session_size: int,
     max_session_size: int,
     processed_dir: Path,
+    user_splits: dict[str, str] | None = None,
     stream: bool = False,
 ) -> int:
     """Create graph training examples and save them in chunks to save RAM.
@@ -365,8 +503,8 @@ def create_all_graphs(
     """
     from certgnn.chunk_store import DvcChunkStore  # lazy import — not needed without --stream
 
-    graph_list = []
-    chunk_idx = 0
+    graph_buffers: dict[str, list] = {"train": [], "val": [], "test": []}
+    chunk_idx = {"train": 0, "val": 0, "test": 0}
     total_graphs = 0
     store = DvcChunkStore(processed_dir) if stream else None
 
@@ -375,6 +513,9 @@ def create_all_graphs(
 
     for user, user_data in tqdm(grouped_users, total=len(grouped_users), desc="  Graphs"):
         # note: user_data = combined[...] deleted to improve performance
+        split_name = user_splits.get(user, "train") if user_splits else "train"
+        if split_name not in graph_buffers:
+            split_name = "train"
 
         for session_hour in user_data["update_hour"].unique():
             sess = user_data[user_data["update_hour"] == session_hour].copy()
@@ -427,26 +568,29 @@ def create_all_graphs(
                         labels[mask_idx],
                         feat_dict,
                         activity_types,
+                        user_id=user,
+                        split_name=split_name,
                     )
-                    graph_list.append(graph)
+                    graph_buffers[split_name].append(graph)
                     total_graphs += 1
 
-        # Flush chunk every 20k graphs
-        if len(graph_list) >= 20000:
-            chunk_path = processed_dir / f"graph_chunk_{chunk_idx}.pt"
+        for split_name, graph_list in graph_buffers.items():
+            if len(graph_list) >= 20000:
+                chunk_path = processed_dir / f"{split_name}_graph_chunk_{chunk_idx[split_name]}.pt"
+                torch.save(graph_list, chunk_path)
+                if store is not None:
+                    store.push_chunk(chunk_path, num_graphs=len(graph_list), delete_local=True)
+                chunk_idx[split_name] += 1
+                graph_list.clear()
+
+    # Flush remaining graphs
+    for split_name, graph_list in graph_buffers.items():
+        if graph_list:
+            chunk_path = processed_dir / f"{split_name}_graph_chunk_{chunk_idx[split_name]}.pt"
             torch.save(graph_list, chunk_path)
             if store is not None:
                 store.push_chunk(chunk_path, num_graphs=len(graph_list), delete_local=True)
-            chunk_idx += 1
             graph_list.clear()
-
-    # Flush remaining graphs
-    if graph_list:
-        chunk_path = processed_dir / f"graph_chunk_{chunk_idx}.pt"
-        torch.save(graph_list, chunk_path)
-        if store is not None:
-            store.push_chunk(chunk_path, num_graphs=len(graph_list), delete_local=True)
-        graph_list.clear()
 
     return total_graphs
 
@@ -460,6 +604,7 @@ def save_processed(
     processed_dir: Path,
     encoder: LabelEncoder,
     activity_types: dict,
+    user_splits: dict[str, list[str]] | None = None,
 ):
     """Save metadata and label encoder."""
     processed_dir.mkdir(parents=True, exist_ok=True)
@@ -472,6 +617,8 @@ def save_processed(
         "activity_types": list(encoder.classes_),
         "activity_types_dict": {k: sorted(v) for k, v in activity_types.items()},
     }
+    if user_splits is not None:
+        metadata["user_splits"] = {key: len(value) for key, value in user_splits.items()}
     
     with open(processed_dir / "metadata.pkl", "wb") as f:
         pickle.dump(metadata, f)
@@ -504,8 +651,21 @@ def main():
     config = load_config()
     root = get_project_root()
 
+    # prep = config.get("preprocessing", {})
+    # data_fraction = prep.get("data_fraction", 1.0)
+    # dataset_version = prep.get("dataset_version", "5.2")
+    # min_session = prep.get("min_session_size", 5)
+    # max_session = prep.get("max_session_size", 50)
+    # seed = prep.get("seed", 42)
+
     prep = config.get("preprocessing", {})
-    data_fraction = prep.get("data_fraction", 1.0)
+    normal_fraction = prep.get("normal_user_fraction", prep.get("data_fraction", 1.0))
+    malicious_fraction = prep.get("malicious_user_fraction", 1.0)
+    balance_malicious = prep.get("balance_malicious_by_scenario", False)
+    strict_equal_scenarios = prep.get("strict_equal_scenarios", True)
+    split_val_ratio = prep.get("split_val_ratio", 0.15)
+    split_test_ratio = prep.get("split_test_ratio", 0.15)
+
     dataset_version = prep.get("dataset_version", "5.2")
     min_session = prep.get("min_session_size", 5)
     max_session = prep.get("max_session_size", 50)
@@ -528,10 +688,52 @@ def main():
     print(f"  {len(mal_ids)} malicious IDs")
 
     # 3. User selection
-    print(f"[3/8] Selecting users (data_fraction={data_fraction})...")
-    selected = select_users(
-        extract_dir, answers_dir, dataset_version, data_fraction, seed,
+    # print(f"[3/8] Selecting users (data_fraction={data_fraction})...")
+    # selected = select_users(
+    #     extract_dir, answers_dir, dataset_version, data_fraction, seed,
+    # )
+    print(
+        "[3/8] Selecting users "
+        f"(normal_fraction={normal_fraction}, "
+        f"malicious_fraction={malicious_fraction}, "
+        f"balance_malicious_by_scenario={balance_malicious})..."
     )
+    selected = select_users(
+        extract_dir=extract_dir,
+        answers_dir=answers_dir,
+        dataset_version=dataset_version,
+        normal_user_fraction=normal_fraction,
+        malicious_user_fraction=malicious_fraction,
+        balance_malicious_by_scenario=balance_malicious,
+        strict_equal_scenarios=strict_equal_scenarios,
+        seed=seed,
+    )
+
+    selected_users = sorted(selected) if selected is not None else sorted(user_df["user_id"].astype(str).unique())
+    malicious_users = set(
+        pd.read_csv(answers_dir / "insiders.csv")["user"].astype(str).unique()
+    )
+    user_labels = {user_id: int(user_id in malicious_users) for user_id in selected_users}
+    user_split_map = build_user_splits(
+        user_ids=selected_users,
+        user_labels=user_labels,
+        val_ratio=float(split_val_ratio),
+        test_ratio=float(split_test_ratio),
+        seed=seed,
+    )
+    save_user_split_manifest(
+        processed_dir=processed_dir,
+        splits=user_split_map,
+        seed=seed,
+        val_ratio=float(split_val_ratio),
+        test_ratio=float(split_test_ratio),
+    )
+    user_to_split = {
+        user_id: split_name
+        for split_name, users in user_split_map.items()
+        for user_id in users
+    }
+
 
     # 4. Load sessions
     print("[4/8] Loading raw data...")
@@ -562,12 +764,18 @@ def main():
     print(f"[8/8] Creating graphs (saving in chunks){stream_msg}...")
     act_types = build_activity_types_dict(combined)
     total_graphs = create_all_graphs(
-        combined, act_types, min_session, max_session, processed_dir, stream=args.stream,
+        combined,
+        act_types,
+        min_session,
+        max_session,
+        processed_dir,
+        user_splits=user_to_split,
+        stream=args.stream,
     )
 
     # Save
     print("Saving metadata...")
-    save_processed(total_graphs, processed_dir, encoder, act_types)
+    save_processed(total_graphs, processed_dir, encoder, act_types, user_splits=user_split_map)
 
     print(f"\nDone! Successfully created and saved {total_graphs} graphs.")
 

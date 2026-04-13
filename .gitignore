@@ -1,5 +1,7 @@
 data/**
-!data/processed/r5.2/*.dvc
+!data/processed/
+!data/processed/**/
+!data/processed/**/*.dvc
 notes/
 context/
 .venv/

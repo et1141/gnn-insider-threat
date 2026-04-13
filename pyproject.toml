@@ -31,6 +31,7 @@ experiment = [
 [project.scripts]
 preprocess = "certgnn.preprocess:main"
 download-data = "certgnn.download_data:download_dataset"
+train-baseline = "certgnn.baseline.train:main"
 
 [build-system]
 requires = ["hatchling"]
