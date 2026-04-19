@@ -1,4 +1,3 @@
-
 def test_data_loading():
     """Test data loading with correct shape."""
     assert True

@@ -17,6 +17,9 @@ dependencies = [
     "matplotlib",
     "jupyter",
     "dvc[gdrive]",
+    "duckdb>=1.5.2",
+    "pytest>=9.0.2",
+    "pytest-mock>=3.15.1",
 ]
 
 [project.optional-dependencies]

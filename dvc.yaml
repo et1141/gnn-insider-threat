@@ -16,7 +16,7 @@ stages:
     cmd: uv run preprocess
     deps:
       - src/certgnn/preprocess.py
-      - src/certgnn/feature_extraction.py
+      - src/certgnn/duckdb_features.py
       - src/certgnn/chunk_store.py
       - data/raw
     params:
