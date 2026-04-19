@@ -9,9 +9,9 @@ def download_dataset():
     cfg = load_config()
     root = get_project_root()
 
-    data_dir = root / cfg['paths']['raw_dir']
-    article_id = cfg['download']['article_id']
-    target_files = cfg['download']['target_files']
+    data_dir = root / cfg["paths"]["raw_dir"]
+    article_id = cfg["download"]["article_id"]
+    target_files = cfg["download"]["target_files"]
 
     api_url = f"https://api.figshare.com/v2/articles/{article_id}/files"
 
@@ -23,21 +23,23 @@ def download_dataset():
     data_dir.mkdir(parents=True, exist_ok=True)
 
     for file_info in files:
-        filename = file_info['name']
+        filename = file_info["name"]
 
         if filename not in target_files:
             continue
 
-        download_url = file_info['download_url']
+        download_url = file_info["download_url"]
         file_path = data_dir / filename
-        file_size = file_info['size']
+        file_size = file_info["size"]
         size_gb = file_size / (1024**3)
 
         # Check if the file already exists and is fully downloaded
         if file_path.exists():
             existing_size = file_path.stat().st_size
             if existing_size == file_size:
-                print(f"File {filename} already exists and is fully downloaded. Skipping.")
+                print(
+                    f"File {filename} already exists and is fully downloaded. Skipping."
+                )
                 continue
             else:
                 print(f"File {filename} is incomplete. Resuming/Restarting download...")
@@ -47,13 +49,16 @@ def download_dataset():
         # Stream the download
         with requests.get(download_url, stream=True) as r:
             r.raise_for_status()
-            with open(file_path, 'wb') as f, tqdm(
-                desc=filename,
-                total=file_size,
-                unit='iB',
-                unit_scale=True,
-                unit_divisor=1024,
-            ) as bar:
+            with (
+                open(file_path, "wb") as f,
+                tqdm(
+                    desc=filename,
+                    total=file_size,
+                    unit="iB",
+                    unit_scale=True,
+                    unit_divisor=1024,
+                ) as bar,
+            ):
                 for chunk in r.iter_content(chunk_size=8192 * 1024):  # 8MB chunks
                     if chunk:
                         f.write(chunk)

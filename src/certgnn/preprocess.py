@@ -1,9 +1,9 @@
-"""Preprocessing pipeline for GNN Insider Threat Detection.
+"""Preprocessing pipeline for GNN Insider Threat Detection using DuckDB.
 
-Loads raw CMU CERT data, extracts features, creates session graphs,
-and saves processed data ready for training.
-
-Adapted from the source paper's 01_feature_extraction.ipynb.
+Adapted from the source paper's 01_feature_extraction.ipynb
+but uses DuckDB for efficient feature extraction.
+Loads raw CMU CERT data, extracts features efficiently with SQL,
+creates session graphs, and saves processed data ready for training.
 
 Usage:
     uv run preprocess           # save chunks locally
@@ -16,6 +16,7 @@ import re
 from collections import defaultdict
 from pathlib import Path
 
+import duckdb
 import numpy as np
 import pandas as pd
 import torch
@@ -23,50 +24,73 @@ from sklearn.preprocessing import LabelEncoder
 from torch_geometric.data import Data
 from tqdm import tqdm
 
-from certgnn.feature_extraction import GetFeature
 from certgnn.utils import get_project_root, load_config
+from certgnn.duckdb_features import (
+    initialize_duckdb,
+    LOGON_SQL,
+    DEVICE_SQL,
+    FILE_SQL,
+    EMAIL_SQL,
+    HTTP_SQL,
+)
 
 # Feature vector layout: [logon(4) | device(6) | file(16) | email(22) | http(6)] = 54
 FEATURE_DIMS = {"logon": 4, "device": 6, "file": 16, "email": 22, "http": 6}
-TOTAL_FEATURE_DIM = sum(FEATURE_DIMS.values())  # 54
+TOTAL_FEATURE_DIM = sum(FEATURE_DIMS.values())
 
 # Pre-computed padding (before, after) for each activity type
-_PADDING: dict[str, tuple[int, int]] = {}
+_PADDING = {}
 _offset = 0
 for _name, _dim in FEATURE_DIMS.items():
     _PADDING[_name] = (_offset, TOTAL_FEATURE_DIM - _offset - _dim)
     _offset += _dim
+
 # logon=(0,50), device=(4,44), file=(10,28), email=(26,6), http=(48,0)
 
 
 # ---------------------------------------------------------------------------
 # Step 1: User-PC mapping
 # ---------------------------------------------------------------------------
-
 def build_user_pc_mapping(extract_dir: Path) -> pd.DataFrame:
     """Build user DataFrame with employee info and most-frequent PC.
 
     Combines LDAP monthly snapshots with logon data to determine each
     user's primary PC (most frequently used).
     """
-    ldap_dir = extract_dir / "LDAP"
-    ldap_dfs = [pd.read_csv(f) for f in sorted(ldap_dir.glob("*.csv"))]
-    ldap_df = pd.concat(ldap_dfs).drop_duplicates(subset="user_id", keep="last")
-
-    logon = pd.read_csv(extract_dir / "logon.csv", usecols=["user", "pc"])
-    pc_counts = logon.groupby(["user", "pc"]).size().reset_index(name="count")
-    most_freq = pc_counts.loc[pc_counts.groupby("user")["count"].idxmax()]
-
-    user_df = ldap_df.merge(
-        most_freq[["user", "pc"]], left_on="user_id", right_on="user", how="left",
-    ).drop(columns=["user"])
+    # Use DuckDB for performance
+    con = duckdb.connect(":memory:")
+    query = f"""
+    WITH RankedLDAP AS (
+        SELECT *, ROW_NUMBER() OVER(PARTITION BY user_id ORDER BY filename DESC) as rn
+        FROM read_csv_auto('{extract_dir}/LDAP/*.csv', filename=true)
+    ),
+    LatestLDAP AS (
+        SELECT * EXCLUDE(rn, filename) FROM RankedLDAP WHERE rn = 1
+    ),
+    LogonCounts AS (
+        SELECT user, pc, COUNT(*) as cnt
+        FROM read_csv_auto('{extract_dir}/logon.csv')
+        GROUP BY user, pc
+    ),
+    RankedLogons AS (
+        SELECT user, pc, cnt, ROW_NUMBER() OVER(PARTITION BY user ORDER BY cnt DESC) as rn
+        FROM LogonCounts
+    ),
+    MostFreqPC AS (
+        SELECT user, pc FROM RankedLogons WHERE rn = 1
+    )
+    SELECT l.*, m.pc as pc_most_freq
+    FROM LatestLDAP l
+    LEFT JOIN MostFreqPC m ON l.user_id = m.user
+    """
+    user_df = con.execute(query).df()
+    user_df = user_df.rename(columns={"pc_most_freq": "pc"})
     return user_df
 
 
 # ---------------------------------------------------------------------------
 # Step 2: Malicious activity IDs
 # ---------------------------------------------------------------------------
-
 def collect_malicious_ids(answers_dir: Path, dataset_version: str) -> set:
     """Collect all malicious activity IDs from answer files."""
     malicious_ids = set()
@@ -85,7 +109,6 @@ def collect_malicious_ids(answers_dir: Path, dataset_version: str) -> set:
 # ---------------------------------------------------------------------------
 # Step 3: User selection
 # ---------------------------------------------------------------------------
-
 def select_users(
     extract_dir: Path,
     answers_dir: Path,
@@ -94,181 +117,216 @@ def select_users(
     seed: int = 42,
 ) -> set | None:
     """Select a subset of users. Malicious users are always included."""
+
     if data_fraction >= 1.0:
         return None
-
     rng = np.random.RandomState(seed)
+    con = duckdb.connect(":memory:")
     all_users = set(
-        pd.read_csv(extract_dir / "logon.csv", usecols=["user"])["user"].unique(),
+        con.execute(
+            f"SELECT DISTINCT user FROM read_csv_auto('{extract_dir}/logon.csv')"
+        ).df()["user"]
     )
     insiders = pd.read_csv(answers_dir / "insiders.csv")
     mal_users = set(
-        insiders[
-            insiders["dataset"].astype(str).str.startswith(dataset_version)
-        ]["user"].unique(),
+        insiders[insiders["dataset"].astype(str).str.startswith(dataset_version)][
+            "user"
+        ].unique()
     )
     non_mal = sorted(all_users - mal_users)
     n = max(1, int(len(non_mal) * data_fraction))
     sampled = set(rng.choice(non_mal, size=n, replace=False))
     selected = sampled | mal_users
-    print(f"  {len(selected)} users: {len(mal_users)} malicious + {len(sampled)} non-malicious")
+    print(
+        f"  {len(selected)} users: {len(mal_users)} malicious + {len(sampled)} non-malicious"
+    )
     return selected
 
 
 # ---------------------------------------------------------------------------
-# Step 4: Load raw sessions
+# Step 4: Load raw sessions & Step 5: Extract features with DuckDB SQL
 # ---------------------------------------------------------------------------
+def create_padded_feature_sql(base_sql: str, source: str) -> str:
+    before, after = _PADDING[source]
+    before_pad = (
+        f"CAST([{', '.join(['0.0'] * before)}] AS DOUBLE[]) || " if before > 0 else ""
+    )
+    after_pad = (
+        f" || CAST([{', '.join(['0.0'] * after)}] AS DOUBLE[])" if after > 0 else ""
+    )
 
-def _load_filtered(
-    filepath: Path,
-    selected_users: set | None,
-    chunksize: int = 100_000,
-    **kwargs,
-):
-    """Load CSV, optionally filtering by user set via chunked reading."""
-    if selected_users is None:
-        return pd.read_csv(filepath, **kwargs)
+    fields = ["super_pc_acess", "other_pc_acess", "after_hour", "week"]
+    if source == "device":
+        fields.extend(["conn", "dis_conn"])
+    elif source == "file":
+        fields.extend(
+            [
+                "to_rem",
+                "f_rem",
+                "f_open",
+                "f_write",
+                "f_delete",
+                "f_copy",
+                "f_type_comp",
+                "f_type_img",
+                "f_type_doc",
+                "f_type_file",
+                "f_type_exec",
+                "f_type_other",
+            ]
+        )
+    elif source == "email":
+        fields.extend(
+            [
+                "to_out_count",
+                "to_in_count",
+                "bcc_out_count",
+                "bcc_in_count",
+                "cc_out_count",
+                "cc_in_count",
+            ]
+        )
+    elif source == "http":
+        fields.extend(["flag_url", "flag_word"])
 
-    chunks = []
-    for chunk in pd.read_csv(filepath, chunksize=chunksize, **kwargs):
-        filtered = chunk[chunk["user"].isin(selected_users)]
-        if len(filtered) > 0:
-            chunks.append(filtered)
-    return pd.concat(chunks, ignore_index=True) if chunks else pd.DataFrame()
+    cast_fields = [f"CAST({f} AS DOUBLE)" for f in fields]
+
+    feature_calc = f"""
+        {before_pad} 
+        [{", ".join(cast_fields)}]
+        {"" if source != "email" else " || CAST(attachment_features AS DOUBLE[])"}
+        {after_pad}
+    """
+
+    return f"""
+    SELECT id, timestamp, user_id, pc, activity_type, source, is_malicious, 
+        {feature_calc} AS feature
+    FROM (
+        {base_sql}
+    ) sub
+    """
 
 
-def load_sessions(
+def process_and_dump_to_parquet(
     extract_dir: Path,
+    processed_dir: Path,
+    user_df: pd.DataFrame,
     malicious_ids: set,
     selected_users: set | None,
-) -> dict[str, pd.DataFrame]:
-    """Load raw CSVs into session DataFrames with parsed timestamps and labels."""
-    sessions = {}
+):
+    print("  Initializing DuckDB ETL...")
+    con = duckdb.connect(":memory:")
+    con.register("user_df", user_df)
+    con.execute("CREATE TABLE users AS SELECT * FROM user_df")
+
+    mal_df = pd.DataFrame({"id": list(malicious_ids)})
+    con.register("mal_df", mal_df)
+    con.execute("CREATE TABLE mal_ids AS SELECT id FROM mal_df")
+
+    sel_filter = ""
+    if selected_users is not None:
+        sel_df = pd.DataFrame({"user": list(selected_users)})
+        con.register("sel_df", sel_df)
+        con.execute("CREATE TABLE sel_users AS SELECT user FROM sel_df")
+        sel_filter = "WHERE e.user IN (SELECT user FROM sel_users)"
+
+    initialize_duckdb(con)
+    parquet_path = processed_dir / "all_features.parquet"
+
+    # HTTP activity doesn't have an activity column, so we default to 'WWW Visit'
     sources = [
-        ("logon", "logon.csv"),
-        ("device", "device.csv"),
-        ("file", "file.csv"),
-        ("email", "email.csv"),
-        ("http", "http.csv"),
+        ("logon", "logon.csv", LOGON_SQL, "e.activity"),
+        ("device", "device.csv", DEVICE_SQL, "e.activity"),
+        ("file", "file.csv", FILE_SQL, "e.activity"),
+        ("email", "email.csv", EMAIL_SQL, "e.activity"),
+        ("http", "http.csv", HTTP_SQL, "'WWW Visit'"),
     ]
 
-    for name, filename in sources:
-        print(f"  Loading {name}...")
-        df = _load_filtered(extract_dir / filename, selected_users)
-        if df.empty:
-            sessions[name] = df
-            print(f"    {name}: 0 rows")
+    for source_name, filename, base_sql, activity_col in sources:
+        filepath = extract_dir / filename
+        if not filepath.exists():
             continue
 
-        df["timestamp"] = pd.to_datetime(df["date"])
-        df["hour"] = df["timestamp"].dt.hour
-        df["is_malicious"] = df["id"].isin(malicious_ids).astype(int)
-        df["user_id"] = df["user"]
+        # Read the file as events
+        con.execute(
+            f"CREATE OR REPLACE VIEW events_{source_name} AS SELECT * FROM read_csv_auto('{filepath}', all_varchar=true, ignore_errors=true) e {sel_filter}"
+        )
 
-        # HTTP has no 'activity' column in raw data
-        if "activity" in df.columns:
-            df["activity_type"] = df["activity"]
-        else:
-            df["activity_type"] = "WWW Visit"
+        modified_base_sql = base_sql.replace(
+            "SELECT",
+            f"""SELECT 
+                e.id,
+                strptime(e.date, '%m/%d/%Y %H:%M:%S') AS timestamp,
+                e.user AS user_id,
+                e.pc,
+                {activity_col} AS activity_type,
+                '{source_name}' AS source,
+                CASE WHEN e.id IN (SELECT id FROM mal_ids) THEN 1 ELSE 0 END AS is_malicious,
+            """,
+            1,
+        ).replace("FROM events e", f"FROM events_{source_name} e")
 
-        # File: ensure boolean columns are proper bools
-        if name == "file":
-            for col in ["to_removable_media", "from_removable_media"]:
-                if df[col].dtype == object:
-                    df[col] = df[col] == "True"
+        final_query = create_padded_feature_sql(modified_base_sql, source_name)
 
-        sessions[name] = df
-        n_mal = int(df["is_malicious"].sum())
-        print(f"    {name}: {len(df):,} rows ({n_mal} malicious)")
+        print(f"  Processing {source_name} and dumping to Parquet: {parquet_path} ...")
+        # DuckDB 0.10+ supports COPY (query) TO ... with APPEND or we can just insert into a table and then copy.
+        # Let's write to a table first, then we dump the table at the end.
+        con.execute(f"CREATE TABLE IF NOT EXISTS all_features AS {final_query} LIMIT 0")
+        con.execute(f"INSERT INTO all_features {final_query}")
 
-    return sessions
-
-
-# ---------------------------------------------------------------------------
-# Step 5: Feature extraction
-# ---------------------------------------------------------------------------
-
-def extract_features(sessions: dict, extractor: GetFeature) -> dict:
-    """Extract and pad features for each activity type."""
-    funcs = {
-        "logon": extractor.get_logon_feature,
-        "device": extractor.get_device_feature,
-        "file": extractor.get_file_feature,
-        "email": extractor.get_email_feature,
-        "http": extractor.get_http_feature,
-    }
-
-    for name, df in sessions.items():
-        if df.empty:
-            continue
-        func = funcs[name]
-        before, after = _PADDING[name]
-        features = []
-
-        for _, row in tqdm(df.iterrows(), total=len(df), desc=f"  {name}"):
-            feat = func(row)
-            features.append([0] * before + feat + [0] * after)
-
-        df["feature"] = features
-        sessions[name] = df.sort_values(by=["user", "timestamp"])
-
-    return sessions
+    print(f"  Saving Parquet to {parquet_path} ...")
+    con.execute(
+        f"COPY (SELECT id, timestamp, user_id, pc, activity_type, source, is_malicious, feature FROM all_features) TO '{parquet_path}' (FORMAT PARQUET)"
+    )
+    return parquet_path
 
 
 # ---------------------------------------------------------------------------
 # Step 6: Combine and encode
 # ---------------------------------------------------------------------------
-
-def combine_and_encode(sessions: dict) -> tuple[pd.DataFrame, LabelEncoder]:
-    """Combine all session types, encode activity types, compute activity codes."""
-    for name, df in sessions.items():
-        if not df.empty:
-            df["source"] = name
-
-    combined = pd.concat(
-        [sessions[n] for n in FEATURE_DIMS if not sessions[n].empty],
-        ignore_index=True,
-    )
+def combine_and_encode_parquet(parquet_path: Path) -> tuple[pd.DataFrame, LabelEncoder]:
+    """Read Parquet, encode activity types, and compute activity codes."""
+    con = duckdb.connect(":memory:")
+    df = con.execute(f"SELECT * FROM '{parquet_path}' ORDER BY user_id, timestamp").df()
 
     encoder = LabelEncoder()
-    combined["activity_type_id"] = encoder.fit_transform(combined["activity_type"])
-    combined["activity_code"] = combined["activity_type_id"] * 24 + combined["hour"]
-    combined = combined.sort_values(by=["user", "timestamp"])
-
-    return combined, encoder
+    df["activity_type_id"] = encoder.fit_transform(df["activity_type"])
+    df["hour"] = df["timestamp"].dt.hour
+    df["activity_code"] = df["activity_type_id"] * 24 + df["hour"]
+    return df, encoder
 
 
 # ---------------------------------------------------------------------------
 # Step 7: Hour merging and feature aggregation
 # ---------------------------------------------------------------------------
-
 def update_hours(df: pd.DataFrame, min_size: int = 5):
     """Merge hours with too few activities into nearest larger hour.
 
     Faithfully adapted from the source notebook's update_hours function.
     """
     changed = False
-    counts = df.groupby(["user", "update_hour"]).size().reset_index(name="count")
+    counts = df.groupby(["user_id", "update_hour"]).size().reset_index(name="count")
 
     for _, row in counts.iterrows():
         if row["count"] < min_size:
-            user = row["user"]
+            user = row["user_id"]
             current = row["update_hour"]
             possible = counts[
-                (counts["user"] == user) & (counts["count"] >= min_size)
+                (counts["user_id"] == user) & (counts["count"] >= min_size)
             ]["update_hour"]
 
             above = possible[possible > current]
             below = possible[possible < current]
-            target = above.min() if above.any() else (below.max() if below.any() else None)
+            target = (
+                above.min() if above.any() else (below.max() if below.any() else None)
+            )
 
             if pd.notna(target):
                 df.loc[
-                    (df["user"] == user) & (df["update_hour"] == current),
+                    (df["user_id"] == user) & (df["update_hour"] == current),
                     "update_hour",
                 ] = target
                 changed = True
-
     return df, changed
 
 
@@ -280,19 +338,20 @@ def _sum_lists(lists):
 def aggregate_features(df: pd.DataFrame) -> pd.DataFrame:
     """Group by (user, date, update_hour, activity_code) and sum features."""
     grouped = (
-        df.groupby(["user", "date", "update_hour", "activity_code"])["feature"]
+        df.groupby(["user_id", "date", "update_hour", "activity_code"])["feature"]
         .apply(lambda x: _sum_lists(x.tolist()))
         .reset_index(name="updated_feature_final")
     )
     return df.merge(
-        grouped, on=["user", "date", "update_hour", "activity_code"], how="left",
+        grouped,
+        on=["user_id", "date", "update_hour", "activity_code"],
+        how="left",
     )
 
 
 # ---------------------------------------------------------------------------
 # Step 8: Graph creation
 # ---------------------------------------------------------------------------
-
 def build_activity_types_dict(combined: pd.DataFrame) -> dict[str, set]:
     """Map each activity category to its set of activity codes.
 
@@ -305,7 +364,9 @@ def build_activity_types_dict(combined: pd.DataFrame) -> dict[str, set]:
     }
 
 
-def _create_graph(sequence, masked_activity, masked_label, features_dict, activity_types):
+def _create_graph(
+    sequence, masked_activity, masked_label, features_dict, activity_types
+):
     """Create a PyG Data object from a masked activity session.
 
     Edges:
@@ -363,7 +424,9 @@ def create_all_graphs(
                 deleted locally immediately after saving. Requires DVC remote
                 to be configured and authenticated.
     """
-    from certgnn.chunk_store import DvcChunkStore  # lazy import — not needed without --stream
+    from certgnn.chunk_store import (
+        DvcChunkStore,
+    )  # lazy import — not needed without --stream
 
     # Keep chunks well under the 2 GB zip64 ceiling of torch.save. At ~55 KB
     # per PyG Data object this yields ~550 MB files.
@@ -388,13 +451,12 @@ def create_all_graphs(
         chunk_idx += 1
         graph_list.clear()
 
-    for user, user_data in tqdm(grouped_users, total=len(grouped_users), desc="  Graphs"):
-        # note: user_data = combined[...] deleted to improve performance
-
+    for user, user_data in tqdm(
+        grouped_users, total=len(grouped_users), desc="  Graphs"
+    ):
         for session_hour in user_data["update_hour"].unique():
             sess = user_data[user_data["update_hour"] == session_hour].copy()
             sess["activity_code"] = sess["activity_code"].astype(int)
-
             if len(sess) < min_session_size:
                 continue
 
@@ -424,9 +486,8 @@ def create_all_graphs(
                     zip(
                         unique["activity_code"].astype(int),
                         unique["updated_feature_final"],
-                    ),
+                    )
                 )
-
                 seq = sub["activity_code"].astype(int).tolist()
                 labels = sub["is_malicious"].tolist()
 
@@ -435,7 +496,6 @@ def create_all_graphs(
                     remaining = seq[:mask_idx] + seq[mask_idx + 1 :]
                     if len(remaining) < 2:
                         continue
-
                     graph = _create_graph(
                         remaining,
                         seq[mask_idx],
@@ -450,7 +510,6 @@ def create_all_graphs(
                 # user can't balloon a chunk past the 2 GB torch.save limit.
                 if len(graph_list) >= CHUNK_SIZE:
                     _flush()
-
     _flush()
     return total_graphs
 
@@ -458,16 +517,11 @@ def create_all_graphs(
 # ---------------------------------------------------------------------------
 # Save
 # ---------------------------------------------------------------------------
-
 def save_processed(
-    total_graphs: int,
-    processed_dir: Path,
-    encoder: LabelEncoder,
-    activity_types: dict,
+    total_graphs: int, processed_dir: Path, encoder: LabelEncoder, activity_types: dict
 ):
     """Save metadata and label encoder."""
     processed_dir.mkdir(parents=True, exist_ok=True)
-
     metadata = {
         "num_graphs": total_graphs,
         "feature_dim": TOTAL_FEATURE_DIM,
@@ -476,10 +530,8 @@ def save_processed(
         "activity_types": list(encoder.classes_),
         "activity_types_dict": {k: sorted(v) for k, v in activity_types.items()},
     }
-    
     with open(processed_dir / "metadata.pkl", "wb") as f:
         pickle.dump(metadata, f)
-
     with open(processed_dir / "label_encoder.pkl", "wb") as f:
         pickle.dump(encoder, f)
 
@@ -490,10 +542,6 @@ def save_processed(
         f"total_graphs={total_graphs}"
     )
 
-
-# ---------------------------------------------------------------------------
-# Main pipeline
-# ---------------------------------------------------------------------------
 
 def main():
     """Run the full preprocessing pipeline."""
@@ -507,7 +555,6 @@ def main():
 
     config = load_config()
     root = get_project_root()
-
     prep = config.get("preprocessing", {})
     data_fraction = prep.get("data_fraction", 1.0)
     dataset_version = prep.get("dataset_version", "5.2")
@@ -521,58 +568,42 @@ def main():
 
     np.random.seed(seed)
 
-    # 1. User-PC mapping
     print("[1/8] Building user-PC mapping...")
     user_df = build_user_pc_mapping(extract_dir)
     print(f"  {len(user_df)} users")
 
-    # 2. Malicious IDs
     print("[2/8] Collecting malicious activity IDs...")
     mal_ids = collect_malicious_ids(answers_dir, dataset_version)
     print(f"  {len(mal_ids)} malicious IDs")
 
-    # 3. User selection
     print(f"[3/8] Selecting users (data_fraction={data_fraction})...")
     selected = select_users(
-        extract_dir, answers_dir, dataset_version, data_fraction, seed,
+        extract_dir, answers_dir, dataset_version, data_fraction, seed
     )
 
-    # 4. Load sessions
-    print("[4/8] Loading raw data...")
-    sessions = load_sessions(extract_dir, mal_ids, selected)
-
-    # 5. Feature extraction
-    print("[5/8] Extracting features...")
-    extractor = GetFeature(user_df)
-    sessions = extract_features(sessions, extractor)
-
-    # 6. Combine and encode
-    print("[6/8] Combining and encoding...")
-    combined, encoder = combine_and_encode(sessions)
-    print(
-        f"  {len(combined):,} activities, "
-        f"{len(encoder.classes_)} types: {list(encoder.classes_)}",
+    print("[4/8 & 5/8] Extracting features via DuckDB SQL to Parquet...")
+    parquet_path = process_and_dump_to_parquet(
+        extract_dir, processed_dir, user_df, mal_ids, selected
     )
 
-    # 7. Update hours and aggregate
+    print("[6/8] Loading from Parquet and encoding...")
+    combined, encoder = combine_and_encode_parquet(parquet_path)
+
     print("[7/8] Hour merging and feature aggregation...")
     combined["update_hour"] = combined["hour"]
     combined, _ = update_hours(combined, min_session)
     combined["date"] = combined["timestamp"].dt.date
     combined = aggregate_features(combined)
 
-    # 8. Graph creation
     stream_msg = " (streaming to GDrive)" if args.stream else ""
     print(f"[8/8] Creating graphs (saving in chunks){stream_msg}...")
     act_types = build_activity_types_dict(combined)
     total_graphs = create_all_graphs(
-        combined, act_types, min_session, max_session, processed_dir, stream=args.stream,
+        combined, act_types, min_session, max_session, processed_dir, stream=args.stream
     )
 
-    # Save
     print("Saving metadata...")
     save_processed(total_graphs, processed_dir, encoder, act_types)
-
     print(f"\nDone! Successfully created and saved {total_graphs} graphs.")
 
 
