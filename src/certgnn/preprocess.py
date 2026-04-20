@@ -423,6 +423,47 @@ def _create_graph(
     return data
 
 
+def estimate_chunk_count(combined: pd.DataFrame, min_session_size: int, max_session_size: int) -> tuple[int, int, int]:
+    """Estimate the number of chunks that will be created.
+
+    Returns:
+        (estimated_chunks, estimated_total_graphs, total_activities)
+    """
+    CHUNK_SIZE = 10_000
+    total_activities = len(combined)
+
+    # Estimate subsessions: split into max_session_size chunks, merge small ones
+    total_subsessions = 0
+    for user, user_data in combined.groupby("user_id"):
+        for session_hour in user_data["update_hour"].unique():
+            sess = user_data[user_data["update_hour"] == session_hour]
+            if len(sess) < min_session_size:
+                continue
+
+            # Split into sub-sessions and merge small ones (same logic as create_all_graphs)
+            subs = [
+                sess.iloc[i : i + max_session_size]
+                for i in range(0, len(sess), max_session_size)
+            ]
+
+            i = 0
+            while i < len(subs):
+                if len(subs[i]) < min_session_size and i + 1 < len(subs):
+                    subs[i] = pd.concat([subs[i], subs.pop(i + 1)])
+                elif len(subs[i]) < min_session_size and i > 0:
+                    subs[i - 1] = pd.concat([subs[i - 1], subs.pop(i)])
+                else:
+                    i += 1
+
+            total_subsessions += sum(1 for sub in subs if len(sub) >= min_session_size)
+
+    # Rough estimate: ~1 graph per activity (after masking and filtering)
+    estimated_graphs = total_activities
+    estimated_chunks = (estimated_graphs + CHUNK_SIZE - 1) // CHUNK_SIZE
+
+    return estimated_chunks, estimated_graphs, total_activities
+
+
 def create_all_graphs(
     combined: pd.DataFrame,
     activity_types: dict,
@@ -651,7 +692,12 @@ def main():
     stream_msg = " (streaming to GDrive)" if args.stream else ""
     if args.stream and keep_local:
         stream_msg += " + keeping local"
+
     print(f"[8/8] Creating graphs (saving in chunks){stream_msg}...")
+    print("  Estimating chunk count...")
+    est_chunks, est_graphs, total_acts = estimate_chunk_count(combined, min_session, max_session)
+    print(f"  → Estimated {est_chunks} chunks (~{est_graphs:,} graphs from {total_acts:,} activities)")
+
     act_types = build_activity_types_dict(combined)
     total_graphs = create_all_graphs(
         combined, act_types, min_session, max_session, processed_dir, stream=args.stream, keep_local=keep_local
