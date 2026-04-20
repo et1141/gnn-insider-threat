@@ -113,12 +113,18 @@ def select_users(
     extract_dir: Path,
     answers_dir: Path,
     dataset_version: str,
-    data_fraction: float,
+    frac_normal_users: float,
     seed: int = 42,
+    frac_malicious_users: float = 1.0,
 ) -> set | None:
-    """Select a subset of users. Malicious users are always included."""
+    """Select a subset of users.
 
-    if data_fraction >= 1.0:
+    Args:
+        frac_normal_users: Fraction of non-malicious users to include (0.0-1.0).
+        frac_malicious_users: Fraction of malicious users to sample (0.0-1.0). 1.0 = all.
+    """
+
+    if frac_normal_users >= 1.0 and frac_malicious_users >= 1.0:
         return None
     rng = np.random.RandomState(seed)
     con = duckdb.connect(":memory:")
@@ -133,8 +139,16 @@ def select_users(
             "user"
         ].unique()
     )
+
+    # Sample malicious users based on fraction
+    if frac_malicious_users < 1.0 and len(mal_users) > 0:
+        mal_count = max(1, int(len(mal_users) * frac_malicious_users))
+        mal_users = set(
+            rng.choice(sorted(mal_users), size=mal_count, replace=False)
+        )
+
     non_mal = sorted(all_users - mal_users)
-    n = max(1, int(len(non_mal) * data_fraction))
+    n = max(1, int(len(non_mal) * frac_normal_users))
     sampled = set(rng.choice(non_mal, size=n, replace=False))
     selected = sampled | mal_users
     print(
@@ -416,13 +430,15 @@ def create_all_graphs(
     max_session_size: int,
     processed_dir: Path,
     stream: bool = False,
+    keep_local: bool = False,
 ) -> int:
     """Create graph training examples and save them in chunks to save RAM.
 
     Args:
-        stream: If True, each chunk is pushed to GDrive via DvcChunkStore and
-                deleted locally immediately after saving. Requires DVC remote
-                to be configured and authenticated.
+        stream: If True, each chunk is pushed to GDrive via DvcChunkStore.
+                Requires DVC remote to be configured and authenticated.
+        keep_local: If True (with --stream), keeps local .pt files after push.
+                    If False, deletes them after push to save disk space.
     """
     from certgnn.chunk_store import (
         DvcChunkStore,
@@ -435,6 +451,9 @@ def create_all_graphs(
     graph_list = []
     chunk_idx = 0
     total_graphs = 0
+    total_activities = 0
+    total_sessions = 0
+    total_subsessions = 0
     store = DvcChunkStore(processed_dir) if stream else None
 
     processed_dir.mkdir(parents=True, exist_ok=True)
@@ -447,7 +466,7 @@ def create_all_graphs(
         chunk_path = processed_dir / f"graph_chunk_{chunk_idx}.pt"
         torch.save(graph_list, chunk_path)
         if store is not None:
-            store.push_chunk(chunk_path, num_graphs=len(graph_list), delete_local=True)
+            store.push_chunk(chunk_path, num_graphs=len(graph_list), delete_local=not keep_local)
         chunk_idx += 1
         graph_list.clear()
 
@@ -459,6 +478,9 @@ def create_all_graphs(
             sess["activity_code"] = sess["activity_code"].astype(int)
             if len(sess) < min_session_size:
                 continue
+
+            total_sessions += 1
+            total_activities += len(sess)
 
             # Split into sub-sessions
             subs = [
@@ -479,6 +501,8 @@ def create_all_graphs(
             for sub in subs:
                 if len(sub) < min_session_size:
                     continue
+
+                total_subsessions += 1
 
                 # Build activity_code -> aggregated feature mapping
                 unique = sub.drop_duplicates(subset="activity_code")
@@ -511,6 +535,22 @@ def create_all_graphs(
                 if len(graph_list) >= CHUNK_SIZE:
                     _flush()
     _flush()
+
+    # Print summary statistics
+    print(f"\n{'='*70}")
+    print(f"Graph Creation Summary")
+    print(f"{'='*70}")
+    print(f"  Total activities processed:    {total_activities:>12,}")
+    print(f"  Total sessions (by hour):      {total_sessions:>12,}")
+    print(f"  Total sub-sessions:            {total_subsessions:>12,}")
+    print(f"  Total graphs created:          {total_graphs:>12,}")
+    print(f"  Avg activities per session:    {total_activities/max(1, total_sessions):>12.1f}")
+    print(f"  Avg activities per subsession: {total_activities/max(1, total_subsessions):>12.1f}")
+    print(f"  Avg graphs per subsession:     {total_graphs/max(1, total_subsessions):>12.1f}")
+    print(f"  Chunks created:                {chunk_idx:>12,}")
+    print(f"  Approx disk usage:             {chunk_idx * 0.55:>12.1f} GB")
+    print(f"{'='*70}\n")
+
     return total_graphs
 
 
@@ -551,16 +591,23 @@ def main():
         action="store_true",
         help="Push each chunk to GDrive via DVC and delete it locally after saving.",
     )
+    parser.add_argument(
+        "--keep-local",
+        action="store_true",
+        help="When used with --stream, keeps local .pt files after pushing to GDrive.",
+    )
     args = parser.parse_args()
 
     config = load_config()
     root = get_project_root()
     prep = config.get("preprocessing", {})
-    data_fraction = prep.get("data_fraction", 1.0)
+    frac_normal_users = prep.get("frac_normal_users", 1.0)
+    frac_malicious_users = prep.get("frac_malicious_users", 1.0)
     dataset_version = prep.get("dataset_version", "5.2")
     min_session = prep.get("min_session_size", 5)
     max_session = prep.get("max_session_size", 50)
     seed = prep.get("seed", 42)
+    keep_local = args.keep_local or prep.get("keep_local", False)
 
     extract_dir = root / config["paths"]["extract_dir"]
     processed_dir = root / config["paths"]["processed_dir"]
@@ -576,9 +623,15 @@ def main():
     mal_ids = collect_malicious_ids(answers_dir, dataset_version)
     print(f"  {len(mal_ids)} malicious IDs")
 
-    print(f"[3/8] Selecting users (data_fraction={data_fraction})...")
+    mal_str = f", frac_malicious={frac_malicious_users}" if frac_malicious_users < 1.0 else ""
+    print(f"[3/8] Selecting users (frac_normal={frac_normal_users}{mal_str})...")
     selected = select_users(
-        extract_dir, answers_dir, dataset_version, data_fraction, seed
+        extract_dir,
+        answers_dir,
+        dataset_version,
+        frac_normal_users,
+        seed,
+        frac_malicious_users=frac_malicious_users,
     )
 
     print("[4/8 & 5/8] Extracting features via DuckDB SQL to Parquet...")
@@ -596,10 +649,12 @@ def main():
     combined = aggregate_features(combined)
 
     stream_msg = " (streaming to GDrive)" if args.stream else ""
+    if args.stream and keep_local:
+        stream_msg += " + keeping local"
     print(f"[8/8] Creating graphs (saving in chunks){stream_msg}...")
     act_types = build_activity_types_dict(combined)
     total_graphs = create_all_graphs(
-        combined, act_types, min_session, max_session, processed_dir, stream=args.stream
+        combined, act_types, min_session, max_session, processed_dir, stream=args.stream, keep_local=keep_local
     )
 
     print("Saving metadata...")

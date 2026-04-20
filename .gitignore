@@ -18,3 +18,8 @@ client_secret*.json
 gdrive_client_secret*
 credentials.json
 token.json
+
+# PyTorch Lightning checkpoints and logs - tracked with DVC
+checkpoints/
+!checkpoints/.gitignore
+lightning_logs/

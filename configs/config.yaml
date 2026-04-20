@@ -11,8 +11,10 @@ download:
     - "answers.tar.bz2"
 
 preprocessing:
-  data_fraction: 0.2   # Fraction of users to include (0.0-1.0). Malicious users always included.
+  frac_normal_users: 0.0085       # Fraction of normal users to include (0.0-1.0), 
+  frac_malicious_users: 0.09      # Fraction of malicious users to sample (0.0-1.0), 99 total
   dataset_version: "5.2"
-  min_session_size: 5    # Minimum activities per session/sub-session
-  max_session_size: 50   # Maximum activities per sub-session before splitting
+  min_session_size: 5             # Minimum activities per session/sub-session
+  max_session_size: 50            # Maximum activities per sub-session before splitting
+  keep_local: true               # Keep local .pt files after push to GDrive
   seed: 42
