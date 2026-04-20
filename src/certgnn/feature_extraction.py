@@ -90,17 +90,25 @@ class ProcessFeature:
                     f_type_other += 1
                     f_type_other_size += int(size)
             type_count = [
-                f_type_comp, f_type_img, f_type_doc,
-                f_type_file, f_type_exec, f_type_other,
+                f_type_comp,
+                f_type_img,
+                f_type_doc,
+                f_type_file,
+                f_type_exec,
+                f_type_other,
             ]
             type_size = [
-                f_type_comp_size, f_type_img_size, f_type_doc_size,
-                f_type_file_size, f_type_exec_size, f_type_other_size,
+                f_type_comp_size,
+                f_type_img_size,
+                f_type_doc_size,
+                f_type_file_size,
+                f_type_exec_size,
+                f_type_other_size,
             ]
             return type_count + type_size
         else:
             return [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
-    
+
     # feature len 16
     def process_file_feature(self, row):
         to_rem = 1 if row["to_removable_media"] == True else 0  # noqa: E712
@@ -128,9 +136,18 @@ class ProcessFeature:
             f_type_other = 1
 
         return (
-            to_rem, f_rem, f_open, f_write, f_delete, f_copy,
-            f_type_comp, f_type_img, f_type_doc, f_type_file,
-            f_type_exec, f_type_other,
+            to_rem,
+            f_rem,
+            f_open,
+            f_write,
+            f_delete,
+            f_copy,
+            f_type_comp,
+            f_type_img,
+            f_type_doc,
+            f_type_file,
+            f_type_exec,
+            f_type_other,
         )
 
     def conn_disconn_status(self, status):
@@ -162,14 +179,14 @@ class ProcessFeature:
                 user_row = self.user_df.loc[self.user_df["user_id"] == user_id]
                 own_pc = user_row["pc"].iloc[0]
                 sup_name = user_row["supervisor"].iloc[0]
-                super_pc = self.user_df.loc[
-                    self.user_df["employee_name"] == sup_name
-                ]["pc"].iloc[0]
+                super_pc = self.user_df.loc[self.user_df["employee_name"] == sup_name][
+                    "pc"
+                ].iloc[0]
                 self._pc_cache[user_id] = (own_pc, super_pc)
             except Exception:
-                own_pc = self.user_df.loc[
-                    self.user_df["user_id"] == user_id
-                ]["pc"].iloc[0]
+                own_pc = self.user_df.loc[self.user_df["user_id"] == user_id][
+                    "pc"
+                ].iloc[0]
                 self._pc_cache[user_id] = (own_pc, None)
         return self._pc_cache[user_id]
 
@@ -196,14 +213,16 @@ class GetFeature:
 
     def get_logon_feature(self, row):
         own_pc, super_pc_acess, other_pc_acess = self.extract_feature.pc_details(
-            row["user"], row["pc"],
+            row["user"],
+            row["pc"],
         )
         after_hour, week = self.extract_feature.is_after_whour(row["timestamp"])
         return [super_pc_acess, other_pc_acess, after_hour, week]
 
     def get_device_feature(self, row):
         own_pc, super_pc_acess, other_pc_acess = self.extract_feature.pc_details(
-            row["user"], row["pc"],
+            row["user"],
+            row["pc"],
         )
         after_hour, week = self.extract_feature.is_after_whour(row["timestamp"])
         conn, dis_conn = self.extract_feature.conn_disconn_status(row["activity_type"])
@@ -211,46 +230,80 @@ class GetFeature:
 
     def get_file_feature(self, row):
         own_pc, super_pc_acess, other_pc_acess = self.extract_feature.pc_details(
-            row["user"], row["pc"],
+            row["user"],
+            row["pc"],
         )
         after_hour, week = self.extract_feature.is_after_whour(row["timestamp"])
         (
-            to_rem, f_rem, f_open, f_write, f_delete, f_copy,
-            f_type_comp, f_type_img, f_type_doc, f_type_file,
-            f_type_exec, f_type_other,
+            to_rem,
+            f_rem,
+            f_open,
+            f_write,
+            f_delete,
+            f_copy,
+            f_type_comp,
+            f_type_img,
+            f_type_doc,
+            f_type_file,
+            f_type_exec,
+            f_type_other,
         ) = self.extract_feature.process_file_feature(row)
         return [
-            super_pc_acess, other_pc_acess, after_hour, week,
-            to_rem, f_rem, f_open, f_write, f_delete, f_copy,
-            f_type_comp, f_type_img, f_type_doc, f_type_file,
-            f_type_exec, f_type_other,
+            super_pc_acess,
+            other_pc_acess,
+            after_hour,
+            week,
+            to_rem,
+            f_rem,
+            f_open,
+            f_write,
+            f_delete,
+            f_copy,
+            f_type_comp,
+            f_type_img,
+            f_type_doc,
+            f_type_file,
+            f_type_exec,
+            f_type_other,
         ]
 
     def get_email_feature(self, row):
         own_pc, super_pc_acess, other_pc_acess = self.extract_feature.pc_details(
-            row["user"], row["pc"],
+            row["user"],
+            row["pc"],
         )
         after_hour, week = self.extract_feature.is_after_whour(row["timestamp"])
         to_out_count, to_in_count = self.extract_feature.get_outside_inside_email_count(
             row["to"],
         )
-        bcc_out_count, bcc_in_count = self.extract_feature.get_outside_inside_email_count(
-            row["bcc"],
+        bcc_out_count, bcc_in_count = (
+            self.extract_feature.get_outside_inside_email_count(
+                row["bcc"],
+            )
         )
         cc_out_count, cc_in_count = self.extract_feature.get_outside_inside_email_count(
             row["cc"],
         )
-        email_file_feature = self.extract_feature.attachment_size_type(row["attachments"])
+        email_file_feature = self.extract_feature.attachment_size_type(
+            row["attachments"]
+        )
         return (
             [super_pc_acess, other_pc_acess, after_hour, week]
-            + [to_out_count, to_in_count, bcc_out_count, bcc_in_count,
-               cc_out_count, cc_in_count]
+            + [
+                to_out_count,
+                to_in_count,
+                bcc_out_count,
+                bcc_in_count,
+                cc_out_count,
+                cc_in_count,
+            ]
             + email_file_feature
         )
 
     def get_http_feature(self, row):
         own_pc, super_pc_acess, other_pc_acess = self.extract_feature.pc_details(
-            row["user"], row["pc"],
+            row["user"],
+            row["pc"],
         )
         after_hour, week = self.extract_feature.is_after_whour(row["timestamp"])
         flag_url = self.extract_feature.process_url(row["url"])

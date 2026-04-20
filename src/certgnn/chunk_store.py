@@ -51,7 +51,9 @@ class DvcChunkStore:
     # Push (preprocessing → GDrive)
     # ------------------------------------------------------------------
 
-    def _push_with_retry(self, dvc_file: Path, retries: int = 3, delay: float = 10.0) -> None:
+    def _push_with_retry(
+        self, dvc_file: Path, retries: int = 3, delay: float = 10.0
+    ) -> None:
         """Run dvc push with exponential backoff on network errors."""
         for attempt in range(1, retries + 1):
             result = subprocess.run(["dvc", "push", str(dvc_file)])
@@ -59,7 +61,9 @@ class DvcChunkStore:
                 return
             if attempt < retries:
                 wait = delay * attempt
-                print(f"  Push failed (attempt {attempt}/{retries}), retrying in {wait:.0f}s...")
+                print(
+                    f"  Push failed (attempt {attempt}/{retries}), retrying in {wait:.0f}s..."
+                )
                 time.sleep(wait)
         raise RuntimeError(f"dvc push failed after {retries} attempts: {dvc_file.name}")
 
