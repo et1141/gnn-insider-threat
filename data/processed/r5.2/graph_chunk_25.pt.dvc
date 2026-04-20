@@ -1,5 +1,5 @@
 outs:
-- md5: fc5847d998816cbbd416400cfbe2088c
-  size: 458408369
+- md5: a2338e19ae2fff772e88643aa5a97c5c
+  size: 382404069
   hash: md5
   path: graph_chunk_25.pt
