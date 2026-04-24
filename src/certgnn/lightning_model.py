@@ -5,6 +5,8 @@ Implements the anomaly-aware loss from the paper: suppress true activity class
 for malicious examples, push model to flag anomalies via low confidence.
 """
 
+import gc
+
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -174,6 +176,10 @@ class InsiderThreatLightning(pl.LightningModule):
         self.val_preds.clear()
         self.val_labels.clear()
 
+        if self.device.type == "mps":
+            gc.collect()
+            torch.mps.empty_cache()
+
     def test_step(self, batch, batch_idx):
         """Test step (same as validation)."""
         logits = self.forward(batch)
@@ -216,6 +222,7 @@ class InsiderThreatLightning(pl.LightningModule):
 
     def on_train_epoch_end(self) -> None:
         if self.device.type == "mps":
+            gc.collect()
             torch.mps.empty_cache()
 
     def configure_optimizers(self):

@@ -27,13 +27,24 @@ from pytorch_lightning.callbacks import (
 
 
 class GPUMetricsCallback(pl.Callback):
-    """Log GPU memory stats to W&B each epoch for MPS and CUDA backends.
+    """Log GPU memory stats to W&B and periodically flush MPS Metal pool.
 
     MPS  — torch.mps: allocated (PyTorch tensors) + driver (total Metal).
-           Utilization % not available without sudo powermetrics.
-    CUDA — torch.cuda: allocated, reserved, and utilization % via pynvml
-           (pynvml ships with nvidia-ml-py, a W&B dependency on CUDA machines).
+           Metal command buffers accumulate every batch; we flush every
+           MPS_FLUSH_INTERVAL steps to prevent unbounded growth.
+           GPU utilization % not available without sudo powermetrics.
+    CUDA — torch.cuda: allocated, reserved, and utilization % via pynvml.
     """
+
+    MPS_FLUSH_INTERVAL = 200  # flush Metal pool every N train batches
+
+    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
+        if pl_module.device.type != "mps":
+            return
+        if batch_idx % self.MPS_FLUSH_INTERVAL == 0:
+            import gc
+            gc.collect()
+            torch.mps.empty_cache()
 
     def on_train_epoch_end(self, trainer, pl_module):
         device = pl_module.device
