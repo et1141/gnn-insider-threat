@@ -17,12 +17,45 @@ import pickle
 from pathlib import Path
 
 import pytorch_lightning as pl
+import torch
 from loguru import logger
 from pytorch_lightning.callbacks import (
     EarlyStopping,
     ModelCheckpoint,
     RichProgressBar,
 )
+
+
+class GPUMetricsCallback(pl.Callback):
+    """Log GPU memory stats to W&B each epoch for MPS and CUDA backends.
+
+    MPS  — torch.mps: allocated (PyTorch tensors) + driver (total Metal).
+           Utilization % not available without sudo powermetrics.
+    CUDA — torch.cuda: allocated, reserved, and utilization % via pynvml
+           (pynvml ships with nvidia-ml-py, a W&B dependency on CUDA machines).
+    """
+
+    def on_train_epoch_end(self, trainer, pl_module):
+        device = pl_module.device
+
+        if device.type == "mps":
+            pl_module.log("gpu/allocated_gb", torch.mps.current_allocated_memory() / 1024**3, on_epoch=True)
+            pl_module.log("gpu/driver_gb", torch.mps.driver_allocated_memory() / 1024**3, on_epoch=True)
+
+        elif device.type == "cuda":
+            idx = device.index or 0
+            pl_module.log("gpu/allocated_gb", torch.cuda.memory_allocated(idx) / 1024**3, on_epoch=True)
+            pl_module.log("gpu/reserved_gb", torch.cuda.memory_reserved(idx) / 1024**3, on_epoch=True)
+            try:
+                import pynvml
+                pynvml.nvmlInit()
+                handle = pynvml.nvmlDeviceGetHandleByIndex(idx)
+                util = pynvml.nvmlDeviceGetUtilizationRates(handle).gpu
+                mem_info = pynvml.nvmlDeviceGetMemoryInfo(handle)
+                pl_module.log("gpu/utilization_pct", float(util), on_epoch=True)
+                pl_module.log("gpu/vram_used_gb", mem_info.used / 1024**3, on_epoch=True)
+            except Exception:
+                pass
 
 from certgnn.datamodule import InsiderThreatDataModule
 from certgnn.lightning_model import InsiderThreatLightning
@@ -81,7 +114,6 @@ def main():
     num_activity_types = metadata["num_activity_types"]
 
     # Determine accelerator: CUDA GPU > Apple MPS > CPU
-    import torch
     if args.gpu is not None:
         accelerator, devices = "gpu", [args.gpu]
     elif torch.cuda.is_available():
@@ -152,9 +184,13 @@ def main():
         mode="min",
     )
 
+    callbacks = [checkpoint_callback, early_stop_callback, RichProgressBar()]
+    if accelerator in ("mps", "gpu"):
+        callbacks.append(GPUMetricsCallback())
+
     trainer = pl.Trainer(
         max_epochs=args.max_epochs,
-        callbacks=[checkpoint_callback, early_stop_callback, RichProgressBar()],
+        callbacks=callbacks,
         accelerator=accelerator,
         devices=devices,
         precision=precision,
