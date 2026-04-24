@@ -17,6 +17,7 @@ dependencies = [
     "matplotlib",
     "jupyter",
     "dvc[gdrive]",
+    "loguru",
     "psutil",
     "duckdb>=1.5.2",
     "pytest>=9.0.2",

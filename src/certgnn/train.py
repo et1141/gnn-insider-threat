@@ -17,6 +17,7 @@ import pickle
 from pathlib import Path
 
 import pytorch_lightning as pl
+from loguru import logger
 from pytorch_lightning.callbacks import (
     EarlyStopping,
     ModelCheckpoint,
@@ -34,8 +35,6 @@ def main():
         description="Train GCN+LSTM model for insider threat detection"
     )
     parser.add_argument(
-
-        
         "--processed-dir",
         type=str,
         default="data/processed/r5.2",
@@ -65,52 +64,67 @@ def main():
     parser.add_argument(
         "--num-workers", type=int, default=0, help="DataLoader worker processes (keep 0 on low-RAM machines)"
     )
+    parser.add_argument(
+        "--wandb-project", type=str, default="gnn-insider-threat", help="W&B project name"
+    )
+    parser.add_argument(
+        "--no-wandb", action="store_true", help="Disable W&B logging"
+    )
     args = parser.parse_args()
 
     root = get_project_root()
     processed_dir = root / args.processed_dir
 
-    # Load metadata to get num_classes and activity types
-    metadata_path = processed_dir / "metadata.pkl"
-    with open(metadata_path, "rb") as f:
+    with open(processed_dir / "metadata.pkl", "rb") as f:
         metadata = pickle.load(f)
     num_activity_classes = metadata["num_classes"]
     num_activity_types = metadata["num_activity_types"]
-    activity_types = metadata["activity_types"]
 
-    # Also load label encoder to verify encoding
-    encoder_path = processed_dir / "label_encoder.pkl"
-    with open(encoder_path, "rb") as f:
-        label_encoder = pickle.load(f)
-    encoder_classes = list(label_encoder.classes_)
+    # Determine accelerator: CUDA GPU > Apple MPS > CPU
+    import torch
+    if args.gpu is not None:
+        accelerator, devices = "gpu", [args.gpu]
+    elif torch.cuda.is_available():
+        accelerator, devices = "gpu", "auto"
+    elif torch.backends.mps.is_available():
+        accelerator, devices = "mps", "auto"
+    else:
+        accelerator, devices = "cpu", "auto"
 
-    print("\n" + "=" * 70)
-    print("Insider Threat Detection: GCN + LSTM")
-    print("=" * 70)
-    print(f"Processed data: {processed_dir}")
-    print(f"Batch size: {args.batch_size}")
-    print(f"Max epochs: {args.max_epochs}")
-    print(f"Split: val={args.val_size}, test={args.test_size}")
-    print("\n[Activity Types Encoding]")
-    print(f"  Found {num_activity_types} activity types:")
-    for i, atype in enumerate(activity_types):
-        print(f"    {i}: {atype}")
-    print(f"  Encoder sees: {encoder_classes}")
-    if activity_types != encoder_classes:
-        print(f"  ⚠️  WARNING: Activity types differ from encoder classes!")
-    print(f"  Total classes: {num_activity_types} types × 24 hours = {num_activity_classes}")
-    print("\n[Paper Comparison]")
-    print(f"  Paper uses: 8 activity types × 24 hours = 192 classes")
-    print(f"  This run: {num_activity_types} activity types × 24 hours = {num_activity_classes} classes")
-    if num_activity_classes != 192:
-        print(f"  ⚠️  MISMATCH: Expected 192 classes from paper, got {num_activity_classes}")
-        print(f"  Model will be initialized with {num_activity_classes} output classes")
-    print("=" * 70 + "\n")
+    precision = "16-mixed" if accelerator == "gpu" else "32-true"
 
-    # Create split strategy
+    if accelerator == "gpu":
+        torch.set_float32_matmul_precision("medium")
+
+    logger.info(
+        f"accelerator={accelerator} | precision={precision} | "
+        f"batch_size={args.batch_size} | max_epochs={args.max_epochs} | "
+        f"num_activity_classes={num_activity_classes}"
+    )
+
+    # W&B logger
+    wandb_logger = None
+    if not args.no_wandb:
+        from pytorch_lightning.loggers import WandbLogger
+        wandb_logger = WandbLogger(
+            project=args.wandb_project,
+            config={
+                "batch_size": args.batch_size,
+                "max_epochs": args.max_epochs,
+                "learning_rate": args.learning_rate,
+                "val_size": args.val_size,
+                "test_size": args.test_size,
+                "seed": args.seed,
+                "accelerator": accelerator,
+                "precision": precision,
+                "num_activity_classes": num_activity_classes,
+                "num_activity_types": num_activity_types,
+                "processed_dir": str(processed_dir),
+            },
+        )
+
     split = RandomSplit(val_size=args.val_size, test_size=args.test_size, seed=args.seed)
 
-    # Create data module
     datamodule = InsiderThreatDataModule(
         processed_dir=processed_dir,
         split_strategy=split,
@@ -118,13 +132,11 @@ def main():
         num_workers=args.num_workers,
     )
 
-    # Create model with correct num_classes from metadata
     model = InsiderThreatLightning(
         learning_rate=args.learning_rate,
         num_activity_classes=num_activity_classes,
     )
 
-    # Callbacks
     checkpoint_callback = ModelCheckpoint(
         monitor="val_loss",
         mode="min",
@@ -140,45 +152,19 @@ def main():
         mode="min",
     )
 
-    # Determine accelerator: CUDA GPU > Apple MPS > CPU
-    import torch
-    if args.gpu is not None:
-        accelerator, devices = "gpu", [args.gpu]
-    elif torch.cuda.is_available():
-        accelerator, devices = "gpu", "auto"
-    elif torch.backends.mps.is_available():
-        accelerator, devices = "mps", "auto"
-    else:
-        accelerator, devices = "cpu", "auto"
-    print(f"Using accelerator: {accelerator}\n")
-
-    precision = "16-mixed" if accelerator == "gpu" else "32-true"
-
-    if accelerator == "gpu":
-        import torch as _torch
-        _torch.set_float32_matmul_precision("medium")
-
-    # Trainer
     trainer = pl.Trainer(
         max_epochs=args.max_epochs,
         callbacks=[checkpoint_callback, early_stop_callback, RichProgressBar()],
         accelerator=accelerator,
         devices=devices,
         precision=precision,
+        logger=wandb_logger,
         enable_progress_bar=True,
         log_every_n_steps=10,
     )
 
-    # Train
     trainer.fit(model, datamodule=datamodule)
-
-    # Test
     trainer.test(model, datamodule=datamodule)
-
-    print("\n" + "=" * 70)
-    print("Training complete!")
-    print("Checkpoints saved to: checkpoints/")
-    print("=" * 70 + "\n")
 
 
 if __name__ == "__main__":

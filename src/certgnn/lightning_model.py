@@ -5,8 +5,8 @@ Implements the anomaly-aware loss from the paper: suppress true activity class
 for malicious examples, push model to flag anomalies via low confidence.
 """
 
+import numpy as np
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 from sklearn.metrics import roc_auc_score, roc_curve
 import pytorch_lightning as pl
@@ -205,21 +205,18 @@ class InsiderThreatLightning(pl.LightningModule):
             optimal_tpr = tpr[idx]
             optimal_fpr = fpr[idx]
 
-            print(f"\n{'='*60}")
-            print(f"Test Set Results")
-            print(f"{'='*60}")
-            print(f"AUC: {auc:.4f}")
-            print(f"Optimal threshold (at ~{target_fpr*100:.0f}% FPR): {optimal_threshold:.4f}")
-            print(f"  TPR @ optimal: {optimal_tpr:.4f}")
-            print(f"  FPR @ optimal: {optimal_fpr:.4f}")
-            print(f"{'='*60}\n")
-
             self.log("test_auc", auc, batch_size=len(labels))
+            self.log("test_tpr_at_16fpr", float(optimal_tpr), batch_size=len(labels))
+            self.log("test_fpr_at_threshold", float(optimal_fpr), batch_size=len(labels))
         except ValueError:
             pass
 
         self.test_preds.clear()
         self.test_labels.clear()
+
+    def on_train_epoch_end(self) -> None:
+        if self.device.type == "mps":
+            torch.mps.empty_cache()
 
     def configure_optimizers(self):
         """Configure optimizer and learning rate scheduler."""

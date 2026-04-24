@@ -23,6 +23,7 @@ from pathlib import Path
 
 import torch
 import pytorch_lightning as pl
+from loguru import logger
 from torch.utils.data import Subset
 from torch_geometric.loader import DataLoader
 
@@ -105,25 +106,21 @@ class InsiderThreatDataModule(pl.LightningDataModule):
 
         Called by PyTorch Lightning. Creates Subset wrappers for each fold.
         """
-        # Load the full streaming dataset
-        print(f"[DEBUG] Creating StreamingChunkDataset with max_local_chunks={self.max_local_chunks}")
         self.dataset = StreamingChunkDataset(
             self.processed_dir, max_local_chunks=self.max_local_chunks
         )
-        print(f"[DEBUG] StreamingChunkDataset created: max_local_chunks={self.dataset.max_local_chunks}")
         n = len(self.dataset)
 
-        # Apply split strategy
         splits = self.split_strategy.split(n)
 
-        # Create Subset wrappers for each fold
         self.train_data = Subset(self.dataset, splits["train"])
         self.val_data = Subset(self.dataset, splits["val"])
         self.test_data = Subset(self.dataset, splits["test"])
 
-        print(
-            f"[DataModule] Using {self.max_local_chunks} chunks cache. Split {n:,} graphs: "
-            f"train={len(self.train_data):,}, val={len(self.val_data):,}, test={len(self.test_data):,}"
+        logger.info(
+            f"Dataset ready | chunks_in_cache={self.max_local_chunks} | "
+            f"total={n:,} | train={len(self.train_data):,} | "
+            f"val={len(self.val_data):,} | test={len(self.test_data):,}"
         )
 
     def _make_loader(self, subset: Subset, shuffle: bool, seed_offset: int) -> DataLoader:
