@@ -6,8 +6,12 @@ disk). The next chunk is then pulled from GDrive on demand.
 
 Usage with PyTorch Lightning:
     dataset = StreamingChunkDataset(processed_dir, max_local_chunks=2)
-    loader = DataLoader(dataset, batch_size=64, num_workers=0)
-    # num_workers=0 required — multi-process access to the LRU cache is unsafe.
+    loader = DataLoader(dataset, batch_size=64, num_workers=4)
+
+Multi-worker DataLoaders are supported: __getstate__/__setstate__ drop the
+threading.Lock before pickling and recreate it in each worker, so every
+worker process ends up with its own independent LRU cache. Note the memory
+implication — each worker duplicates up to `max_local_chunks` chunks in RAM.
 """
 
 import threading

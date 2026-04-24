@@ -32,6 +32,15 @@ class RandomSplit:
 
     Splits a dataset randomly into three folds with specified sizes.
     Deterministic given a seed.
+
+    TODO(leakage): per-graph random split leaks across folds. Each subsession
+    produces ~50 masked variants sharing ~53/54 activities; random split scatters
+    them across train/val/test, so the model sees most of a test session during
+    training and inflates test AUC. 
+    Fix: 
+    1) temporal split (preffered)
+    2) session split / userSplit: keeps all variants of one subsession (or one user)
+    Both strategies requires tagging each graph  with additional metadata during preprocess.
     """
 
     def __init__(self, val_size: float = 0.1, test_size: float = 0.2, seed: int = 42):

@@ -21,10 +21,12 @@ Usage:
 
 from pathlib import Path
 
+import torch
 import pytorch_lightning as pl
 from torch.utils.data import Subset
 from torch_geometric.loader import DataLoader
 
+from certgnn.sampler import ChunkAwareSampler
 from certgnn.split import SplitStrategy
 from certgnn.streaming_dataset import StreamingChunkDataset
 
@@ -62,6 +64,8 @@ class InsiderThreatDataModule(pl.LightningDataModule):
         batch_size: int = 32,
         num_workers: int = 0,
         max_local_chunks: int | None = None,
+        pin_memory: bool | None = None,
+        sampler_seed: int = 42,
     ):
         """Initialize the DataModule.
 
@@ -69,18 +73,18 @@ class InsiderThreatDataModule(pl.LightningDataModule):
             processed_dir: Path to directory with chunks and manifest.
             split_strategy: SplitStrategy instance (e.g., RandomSplit).
             batch_size: Batch size for DataLoaders.
-            num_workers: Number of worker processes (default 0). With num_workers>0 each process gets its own LRU cache copy — safe when chunks are local.
-            max_local_chunks: How many chunk files to keep cached on disk simultaneously.
-                If None (default), auto-detects based on number of chunks to avoid re-downloading.
-
-        Raises:
-            ValueError: If num_workers != 0.
+            num_workers: Number of worker processes. With num_workers>0 each process gets its own LRU cache copy — safe when chunks are local.
+            max_local_chunks: How many chunk files to keep cached in memory simultaneously.
+                If None (default), auto-detects based on available RAM.
+            pin_memory: Pin CPU tensors for faster GPU transfer. Defaults to True when CUDA is available.
         """
         super().__init__()
         self.processed_dir = Path(processed_dir)
         self.split_strategy = split_strategy
         self.batch_size = batch_size
         self.num_workers = num_workers
+        self.pin_memory = torch.cuda.is_available() if pin_memory is None else pin_memory
+        self.sampler_seed = sampler_seed
 
         if max_local_chunks is None:
             from certgnn.chunk_store import DvcChunkStore
@@ -122,35 +126,33 @@ class InsiderThreatDataModule(pl.LightningDataModule):
             f"train={len(self.train_data):,}, val={len(self.val_data):,}, test={len(self.test_data):,}"
         )
 
-    def train_dataloader(self) -> DataLoader:
-        """Return training DataLoader with shuffling."""
-        assert self.train_data is not None, "Call setup() first"
+    def _make_loader(self, subset: Subset, shuffle: bool, seed_offset: int) -> DataLoader:
+        sampler = ChunkAwareSampler(
+            subset,
+            active_chunks=self.max_local_chunks,
+            shuffle=shuffle,
+            seed=self.sampler_seed + seed_offset,
+        )
         return DataLoader(
-            self.train_data,
+            subset,
             batch_size=self.batch_size,
-            shuffle=True,
+            sampler=sampler,
             num_workers=self.num_workers,
             persistent_workers=self.num_workers > 0,
+            pin_memory=self.pin_memory,
         )
+
+    def train_dataloader(self) -> DataLoader:
+        """Return training DataLoader with chunk-aware shuffling."""
+        assert self.train_data is not None, "Call setup() first"
+        return self._make_loader(self.train_data, shuffle=True, seed_offset=0)
 
     def val_dataloader(self) -> DataLoader:
-        """Return validation DataLoader without shuffling."""
+        """Return validation DataLoader (deterministic chunk-sequential order)."""
         assert self.val_data is not None, "Call setup() first"
-        return DataLoader(
-            self.val_data,
-            batch_size=self.batch_size,
-            shuffle=False,
-            num_workers=self.num_workers,
-            persistent_workers=self.num_workers > 0,
-        )
+        return self._make_loader(self.val_data, shuffle=False, seed_offset=1)
 
     def test_dataloader(self) -> DataLoader:
-        """Return test DataLoader without shuffling."""
+        """Return test DataLoader (deterministic chunk-sequential order)."""
         assert self.test_data is not None, "Call setup() first"
-        return DataLoader(
-            self.test_data,
-            batch_size=self.batch_size,
-            shuffle=False,
-            num_workers=self.num_workers,
-            persistent_workers=self.num_workers > 0,
-        )
+        return self._make_loader(self.test_data, shuffle=False, seed_offset=2)

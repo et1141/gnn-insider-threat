@@ -42,7 +42,7 @@ def main():
         help="Path to processed data directory",
     )
     parser.add_argument(
-        "--batch-size", type=int, default=32, help="Batch size for training"
+        "--batch-size", type=int, default=128, help="Batch size for training"
     )
     parser.add_argument(
         "--max-epochs", type=int, default=10, help="Maximum number of epochs"
@@ -61,6 +61,9 @@ def main():
     )
     parser.add_argument(
         "--gpu", type=int, default=None, help="GPU device (0, 1, ...). None = CPU"
+    )
+    parser.add_argument(
+        "--num-workers", type=int, default=0, help="DataLoader worker processes (keep 0 on low-RAM machines)"
     )
     args = parser.parse_args()
 
@@ -112,7 +115,7 @@ def main():
         processed_dir=processed_dir,
         split_strategy=split,
         batch_size=args.batch_size,
-        num_workers=0,  # Required for StreamingChunkDataset
+        num_workers=args.num_workers,
     )
 
     # Create model with correct num_classes from metadata
@@ -137,12 +140,31 @@ def main():
         mode="min",
     )
 
+    # Determine accelerator: CUDA GPU > Apple MPS > CPU
+    import torch
+    if args.gpu is not None:
+        accelerator, devices = "gpu", [args.gpu]
+    elif torch.cuda.is_available():
+        accelerator, devices = "gpu", "auto"
+    elif torch.backends.mps.is_available():
+        accelerator, devices = "mps", "auto"
+    else:
+        accelerator, devices = "cpu", "auto"
+    print(f"Using accelerator: {accelerator}\n")
+
+    precision = "16-mixed" if accelerator == "gpu" else "32-true"
+
+    if accelerator == "gpu":
+        import torch as _torch
+        _torch.set_float32_matmul_precision("medium")
+
     # Trainer
     trainer = pl.Trainer(
         max_epochs=args.max_epochs,
         callbacks=[checkpoint_callback, early_stop_callback, RichProgressBar()],
-        accelerator="gpu" if args.gpu is not None else "cpu",
-        devices=[args.gpu] if args.gpu is not None else "auto",
+        accelerator=accelerator,
+        devices=devices,
+        precision=precision,
         enable_progress_bar=True,
         log_every_n_steps=10,
     )
