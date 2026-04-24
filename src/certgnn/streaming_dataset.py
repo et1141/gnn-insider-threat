@@ -23,18 +23,23 @@ from certgnn.chunk_store import DvcChunkStore
 class StreamingChunkDataset(Dataset):
     """Dataset that streams graph chunks from DVC remote (Google Drive).
 
+    Implements a two-level cache: in-memory LRU (max_local_chunks) + disk cache.
+    When a chunk is evicted from memory, it stays on disk; if accessed again,
+    it loads from disk without pulling from remote (unless missing entirely).
+
     Args:
         processed_dir: Directory containing chunk files and their .dvc pointers.
-        max_local_chunks: How many chunk files to keep on disk simultaneously.
-        delete_after_eviction: Delete a chunk file from disk when it's evicted
-            from the local cache (frees disk space).
+        max_local_chunks: How many chunk files to keep loaded in memory simultaneously.
+        delete_after_eviction: If True, delete chunk files from disk when evicted
+            from memory (frees disk space but requires re-pulling from remote).
+            Default False: keeps files on disk for fast local reload.
     """
 
     def __init__(
         self,
         processed_dir: Path,
         max_local_chunks: int = 2,
-        delete_after_eviction: bool = True,
+        delete_after_eviction: bool = False,
     ):
         self.processed_dir = Path(processed_dir)
         self.store = DvcChunkStore(self.processed_dir)
@@ -56,6 +61,15 @@ class StreamingChunkDataset(Dataset):
 
         # LRU cache: chunk_name → loaded list[Data]
         self._loaded: OrderedDict[str, list] = OrderedDict()
+        self._lock = threading.Lock()
+
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        del state["_lock"]
+        return state
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)
         self._lock = threading.Lock()
 
     def __len__(self) -> int:

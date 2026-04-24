@@ -1,0 +1,5 @@
+outs:
+- md5: e90b4ee7420fbb7de36bdb840d194070
+  size: 337
+  hash: md5
+  path: label_encoder.pkl

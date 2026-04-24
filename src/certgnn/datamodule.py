@@ -29,14 +29,30 @@ from certgnn.split import SplitStrategy
 from certgnn.streaming_dataset import StreamingChunkDataset
 
 
+def _estimate_max_chunks(num_chunks: int, processed_dir: Path) -> int:
+    """Return how many chunks fit in ~70% of available RAM."""
+    try:
+        import psutil
+
+        available_ram = psutil.virtual_memory().available
+        chunk_files = sorted(processed_dir.glob("graph_chunk_*.pt"))
+        if chunk_files:
+            chunk_size = chunk_files[0].stat().st_size * 1.2  # 20% in-memory overhead
+        else:
+            chunk_size = 300 * 1024**2  # 300 MB fallback when no file on disk yet
+        return max(4, min(num_chunks, int(available_ram * 0.7 / chunk_size)))
+    except ImportError:
+        return min(num_chunks, 16)
+
+
 class InsiderThreatDataModule(pl.LightningDataModule):
     """DataModule for streaming insider threat detection graphs.
 
     Lazily loads chunks from disk/remote via StreamingChunkDataset, applies a
     pluggable split strategy, and provides DataLoaders for training.
 
-    Warning: num_workers must be 0 due to LRU cache in StreamingChunkDataset
-    not being multiprocess-safe. Data loading happens in the main process.
+    With num_workers>0 each worker spawns its own dataset copy (macOS uses
+    spawn), so the LRU cache is independent per process — safe for local chunks.
     """
 
     def __init__(
@@ -53,7 +69,7 @@ class InsiderThreatDataModule(pl.LightningDataModule):
             processed_dir: Path to directory with chunks and manifest.
             split_strategy: SplitStrategy instance (e.g., RandomSplit).
             batch_size: Batch size for DataLoaders.
-            num_workers: Number of worker processes. MUST be 0 (LRU cache limitation).
+            num_workers: Number of worker processes (default 0). With num_workers>0 each process gets its own LRU cache copy — safe when chunks are local.
             max_local_chunks: How many chunk files to keep cached on disk simultaneously.
                 If None (default), auto-detects based on number of chunks to avoid re-downloading.
 
@@ -61,26 +77,17 @@ class InsiderThreatDataModule(pl.LightningDataModule):
             ValueError: If num_workers != 0.
         """
         super().__init__()
-        if num_workers != 0:
-            raise ValueError(
-                f"num_workers must be 0 (got {num_workers}). "
-                "StreamingChunkDataset's LRU cache is not multiprocess-safe."
-            )
-
         self.processed_dir = Path(processed_dir)
         self.split_strategy = split_strategy
         self.batch_size = batch_size
         self.num_workers = num_workers
 
-        # Auto-detect number of chunks if max_local_chunks not specified
         if max_local_chunks is None:
             from certgnn.chunk_store import DvcChunkStore
 
             store = DvcChunkStore(self.processed_dir)
             num_chunks = len(store.list_chunks())
-            # Keep all chunks in cache to avoid re-downloading
-            # (better than default 4 which causes thrashing with many chunks)
-            self.max_local_chunks = max(4, min(num_chunks, 16))
+            self.max_local_chunks = _estimate_max_chunks(num_chunks, self.processed_dir)
         else:
             self.max_local_chunks = max_local_chunks
 
@@ -123,6 +130,7 @@ class InsiderThreatDataModule(pl.LightningDataModule):
             batch_size=self.batch_size,
             shuffle=True,
             num_workers=self.num_workers,
+            persistent_workers=self.num_workers > 0,
         )
 
     def val_dataloader(self) -> DataLoader:
@@ -133,6 +141,7 @@ class InsiderThreatDataModule(pl.LightningDataModule):
             batch_size=self.batch_size,
             shuffle=False,
             num_workers=self.num_workers,
+            persistent_workers=self.num_workers > 0,
         )
 
     def test_dataloader(self) -> DataLoader:
@@ -143,4 +152,5 @@ class InsiderThreatDataModule(pl.LightningDataModule):
             batch_size=self.batch_size,
             shuffle=False,
             num_workers=self.num_workers,
+            persistent_workers=self.num_workers > 0,
         )
