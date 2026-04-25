@@ -33,19 +33,32 @@ from certgnn.streaming_dataset import StreamingChunkDataset
 
 
 def _estimate_max_chunks(num_chunks: int, processed_dir: Path) -> int:
-    """Return how many chunks fit in ~70% of available RAM."""
+    """Pick a chunk-cache size that survives a multi-hour MPS run on a 16 GB Mac.
+
+    The earlier 1.2x file-size multiplier underestimated by ~3x: a 380 MB chunk
+    file balloons to >1 GB in Python heap (Data dict overhead, tensor metadata,
+    refcount bookkeeping). Combined with the macOS allocator never returning
+    freed pages to the OS, an oversized cache caused 60+ GB physical footprints
+    and full swap saturation after a few epochs.
+
+    Budget: subtract a 5 GB reserve for model + MPS Metal pool + OS, then size
+    the cache against half of what's left, with a hard ceiling of 6 chunks.
+    """
     try:
         import psutil
 
         available_ram = psutil.virtual_memory().available
         chunk_files = sorted(processed_dir.glob("graph_chunk_*.pt"))
         if chunk_files:
-            chunk_size = chunk_files[0].stat().st_size * 1.2  # 20% in-memory overhead
+            chunk_size = chunk_files[0].stat().st_size * 3.0
         else:
-            chunk_size = 300 * 1024**2  # 300 MB fallback when no file on disk yet
-        return max(4, min(num_chunks, int(available_ram * 0.7 / chunk_size)))
+            chunk_size = 1024 * 1024**2
+        reserve = 5 * 1024**3
+        usable = max(0, available_ram - reserve)
+        budget = max(2, int(usable * 0.5 / chunk_size))
+        return max(2, min(num_chunks, 6, budget))
     except ImportError:
-        return min(num_chunks, 16)
+        return min(num_chunks, 4)
 
 
 class InsiderThreatDataModule(pl.LightningDataModule):

@@ -14,6 +14,10 @@ worker process ends up with its own independent LRU cache. Note the memory
 implication — each worker duplicates up to `max_local_chunks` chunks in RAM.
 """
 
+import ctypes
+import ctypes.util
+import gc
+import sys
 import threading
 from collections import OrderedDict
 from pathlib import Path
@@ -22,6 +26,25 @@ import torch
 from torch.utils.data import Dataset
 
 from certgnn.chunk_store import DvcChunkStore
+
+_LIBC = ctypes.CDLL(ctypes.util.find_library("c")) if sys.platform == "darwin" else None
+
+
+def _release_heap_to_os() -> None:
+    """Force the allocator to give freed pages back to the OS.
+
+    macOS's malloc keeps freed pages in per-zone caches indefinitely, so after
+    repeated torch.load/del cycles the process's physical footprint grows without
+    bound even though Python no longer references the data. Calling
+    `malloc_zone_pressure_relief(NULL, 0)` walks every zone and unmaps the empty
+    regions; on Linux this is a no-op (glibc already does it via M_TRIM).
+    """
+    gc.collect()
+    if _LIBC is not None:
+        try:
+            _LIBC.malloc_zone_pressure_relief(None, 0)
+        except (AttributeError, OSError):
+            pass
 
 
 class StreamingChunkDataset(Dataset):
@@ -94,11 +117,13 @@ class StreamingChunkDataset(Dataset):
 
             # Evict oldest chunk if at capacity
             if len(self._loaded) >= self.max_local_chunks:
-                evicted_name, _ = self._loaded.popitem(last=False)
+                evicted_name, evicted_data = self._loaded.popitem(last=False)
+                del evicted_data
                 if self.delete_after_eviction:
                     evicted_path = self.processed_dir / evicted_name
                     if evicted_path.exists():
                         evicted_path.unlink()
+                _release_heap_to_os()
 
             # Pull from remote and load
             chunk_path = self.store.pull_chunk(chunk_name)
