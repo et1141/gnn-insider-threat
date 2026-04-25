@@ -13,7 +13,11 @@ Or with custom arguments:
 """
 
 import argparse
+import os
 import pickle
+import re
+import subprocess
+import sys
 from pathlib import Path
 
 import pytorch_lightning as pl
@@ -26,47 +30,92 @@ from pytorch_lightning.callbacks import (
 )
 
 
-class GPUMetricsCallback(pl.Callback):
-    """Log GPU memory stats to W&B and periodically flush MPS Metal pool.
+def _proc_memory_metrics() -> dict:
+    """Return the training process's memory footprint, suitable for W&B.
 
-    MPS  — torch.mps: allocated (PyTorch tensors) + driver (total Metal).
-           Metal command buffers accumulate every batch; we flush every
+    rss/vms come from psutil. On macOS we additionally parse `vmmap -summary`
+    for `Physical footprint` — this is what Activity Monitor calls "Memory" and
+    includes compressed + swapped pages, which is the number that visibly grows
+    during long runs on Apple Silicon.
+    """
+    metrics: dict = {}
+    try:
+        import psutil
+        p = psutil.Process(os.getpid())
+        mem = p.memory_info()
+        metrics["proc/rss_gb"] = mem.rss / 1024**3
+        metrics["proc/vms_gb"] = mem.vms / 1024**3
+        try:
+            metrics["proc/uss_gb"] = p.memory_full_info().uss / 1024**3
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+    if sys.platform == "darwin":
+        try:
+            out = subprocess.run(
+                ["vmmap", "-summary", str(os.getpid())],
+                capture_output=True, text=True, timeout=15,
+            ).stdout
+            scale = {"K": 1 / 1024**2, "M": 1 / 1024, "G": 1.0, "T": 1024.0}
+            m = re.search(r"Physical footprint:\s+([\d.]+)([KMGT])", out)
+            if m:
+                metrics["proc/physical_footprint_gb"] = float(m.group(1)) * scale[m.group(2)]
+            m = re.search(r"Physical footprint \(peak\):\s+([\d.]+)([KMGT])", out)
+            if m:
+                metrics["proc/physical_footprint_peak_gb"] = float(m.group(1)) * scale[m.group(2)]
+            m = re.search(r"swapped_out=([\d.]+)([KMGT])", out)
+            if m:
+                metrics["proc/swapped_out_gb"] = float(m.group(1)) * scale[m.group(2)]
+        except Exception:
+            pass
+    return metrics
+
+
+class GPUMetricsCallback(pl.Callback):
+    """Log GPU + process memory to W&B at epoch end; flush MPS pool mid-epoch.
+
+    MPS  — memory metrics only (utilization % requires sudo powermetrics).
+           Metal command buffers accumulate each batch; flushed every
            MPS_FLUSH_INTERVAL steps to prevent unbounded growth.
-           GPU utilization % not available without sudo powermetrics.
-    CUDA — torch.cuda: allocated, reserved, and utilization % via pynvml.
+    CUDA — memory + utilization % via pynvml (bundled with W&B on CUDA hosts).
+    Process — rss/vms/uss + macOS physical footprint, the number Activity
+              Monitor displays. This is the metric to watch for heap leaks.
     """
 
-    MPS_FLUSH_INTERVAL = 200  # flush Metal pool every N train batches
+    MPS_FLUSH_INTERVAL = 200
 
     def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
-        if pl_module.device.type != "mps":
-            return
-        if batch_idx % self.MPS_FLUSH_INTERVAL == 0:
+        if pl_module.device.type == "mps" and batch_idx % self.MPS_FLUSH_INTERVAL == 0:
             import gc
             gc.collect()
             torch.mps.empty_cache()
 
     def on_train_epoch_end(self, trainer, pl_module):
         device = pl_module.device
+        if trainer.logger is None:
+            return
 
+        metrics: dict = {}
         if device.type == "mps":
-            pl_module.log("gpu/allocated_gb", torch.mps.current_allocated_memory() / 1024**3, on_epoch=True)
-            pl_module.log("gpu/driver_gb", torch.mps.driver_allocated_memory() / 1024**3, on_epoch=True)
-
+            metrics["gpu/allocated_gb"] = torch.mps.current_allocated_memory() / 1024**3
+            metrics["gpu/driver_gb"] = torch.mps.driver_allocated_memory() / 1024**3
         elif device.type == "cuda":
             idx = device.index or 0
-            pl_module.log("gpu/allocated_gb", torch.cuda.memory_allocated(idx) / 1024**3, on_epoch=True)
-            pl_module.log("gpu/reserved_gb", torch.cuda.memory_reserved(idx) / 1024**3, on_epoch=True)
+            metrics["gpu/allocated_gb"] = torch.cuda.memory_allocated(idx) / 1024**3
+            metrics["gpu/reserved_gb"] = torch.cuda.memory_reserved(idx) / 1024**3
             try:
                 import pynvml
                 pynvml.nvmlInit()
                 handle = pynvml.nvmlDeviceGetHandleByIndex(idx)
-                util = pynvml.nvmlDeviceGetUtilizationRates(handle).gpu
-                mem_info = pynvml.nvmlDeviceGetMemoryInfo(handle)
-                pl_module.log("gpu/utilization_pct", float(util), on_epoch=True)
-                pl_module.log("gpu/vram_used_gb", mem_info.used / 1024**3, on_epoch=True)
+                metrics["gpu/utilization_pct"] = float(pynvml.nvmlDeviceGetUtilizationRates(handle).gpu)
+                metrics["gpu/vram_used_gb"] = pynvml.nvmlDeviceGetMemoryInfo(handle).used / 1024**3
             except Exception:
                 pass
+
+        metrics.update(_proc_memory_metrics())
+        trainer.logger.log_metrics(metrics, step=trainer.global_step)
 
 from certgnn.datamodule import InsiderThreatDataModule
 from certgnn.lightning_model import InsiderThreatLightning
@@ -106,7 +155,10 @@ def main():
         "--gpu", type=int, default=None, help="GPU device (0, 1, ...). None = CPU"
     )
     parser.add_argument(
-        "--num-workers", type=int, default=0, help="DataLoader worker processes (keep 0 on low-RAM machines)"
+        "--num-workers", type=int, default=1,
+        help="DataLoader worker processes. With persistent_workers=False, each "
+             "phase respawns workers — kernel reclaims their full memory between "
+             "phases, which is the only reliable way to bound heap on Apple Silicon.",
     )
     parser.add_argument(
         "--wandb-project", type=str, default="gnn-insider-threat", help="W&B project name"

@@ -67,8 +67,13 @@ class InsiderThreatDataModule(pl.LightningDataModule):
     Lazily loads chunks from disk/remote via StreamingChunkDataset, applies a
     pluggable split strategy, and provides DataLoaders for training.
 
-    With num_workers>0 each worker spawns its own dataset copy (macOS uses
-    spawn), so the LRU cache is independent per process — safe for local chunks.
+    persistent_workers is hard-coded to False so worker subprocesses die at the
+    end of every train/val/test phase. Apple Silicon's pymalloc + nano-malloc
+    never return freed pages to the OS, so a long-lived process accumulates
+    fragmented heap into tens of GB after a few epochs of chunk loading. Killing
+    workers per phase lets the kernel reclaim everything outright. The cost is
+    spawn overhead + a cold LRU cache at each phase start (~10–30 s on macOS),
+    which is negligible compared to a 30-min epoch.
     """
 
     def __init__(
@@ -148,7 +153,7 @@ class InsiderThreatDataModule(pl.LightningDataModule):
             batch_size=self.batch_size,
             sampler=sampler,
             num_workers=self.num_workers,
-            persistent_workers=self.num_workers > 0,
+            persistent_workers=False,
             pin_memory=self.pin_memory,
         )
 
