@@ -17,6 +17,8 @@ dependencies = [
     "matplotlib",
     "jupyter",
     "dvc[gdrive]",
+    "wandb>=0.25.1",
+    "torchvision>=0.26.0",
 ]
 
 [project.optional-dependencies]
@@ -32,6 +34,12 @@ experiment = [
 preprocess = "certgnn.preprocess:main"
 download-data = "certgnn.download_data:download_dataset"
 train-baseline = "certgnn.baseline.train:main"
+test-baseline = "certgnn.baseline.test_baseline:main"
+
+[[tool.uv.index]]
+name = "pytorch"
+url = "https://download.pytorch.org/whl/cu126"
+explicit = true
 
 [build-system]
 requires = ["hatchling"]

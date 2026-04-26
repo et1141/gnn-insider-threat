@@ -5,10 +5,7 @@ from __future__ import annotations
 import pickle
 from pathlib import Path
 
-from torch_geometric.loader import DataLoader
-
 from certgnn.chunk_store import DvcChunkStore
-from certgnn.streaming_dataset import StreamingChunkDataset
 
 
 def load_processed_metadata(processed_dir: Path) -> dict:
@@ -37,29 +34,4 @@ def list_split_chunks(processed_dir: Path, split: str) -> list[str]:
     raise FileNotFoundError(
         f"No chunk files found for split '{split}' in {processed_dir}. "
         "Run preprocessing with split-aware chunk export first."
-    )
-
-
-def build_dataloader(
-    processed_dir: Path,
-    split: str,
-    batch_size: int,
-    max_local_chunks: int = 2,
-    shuffle: bool = False,
-    num_workers: int = 0,
-    delete_after_eviction: bool = True,
-) -> DataLoader:
-    chunk_names = list_split_chunks(processed_dir, split)
-    dataset = StreamingChunkDataset(
-        processed_dir=processed_dir,
-        max_local_chunks=max_local_chunks,
-        chunk_names=chunk_names,
-        delete_after_eviction=delete_after_eviction,
-    )
-    return DataLoader(
-        dataset,
-        batch_size=batch_size,
-        shuffle=shuffle,
-        num_workers=num_workers,
-        persistent_workers=False,
     )

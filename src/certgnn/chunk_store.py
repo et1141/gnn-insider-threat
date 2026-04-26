@@ -2,9 +2,6 @@
 
 Handles per-chunk push during preprocessing and on-demand pull during training,
 so the full dataset never needs to live locally at once.
-
-The manifest (configs/chunks_manifest.json) is committed to git and tracks
-which chunks exist on remote and how many graphs each contains.
 """
 
 import json
@@ -13,25 +10,12 @@ from pathlib import Path
 
 from certgnn.utils import get_project_root
 
-MANIFEST_PATH = get_project_root() / "configs" / "chunks_manifest.json"
-
-
 class DvcChunkStore:
-    """Stream graph chunks to/from DVC remote (Google Drive).
+    """Stream graph chunks to/from DVC remote (Google Drive)."""
 
-    During preprocessing:
-        store = DvcChunkStore(processed_dir)
-        store.push_chunk(chunk_path, num_graphs=len(graph_list), delete_local=True)
-
-    During training:
-        store = DvcChunkStore(processed_dir)
-        chunk_path = store.pull_chunk("graph_chunk_0.pt")
-        graphs = torch.load(chunk_path)
-        chunk_path.unlink()   # free disk space after use
-    """
-
-    def __init__(self, processed_dir: Path):
+    def __init__(self, processed_dir: Path, manifest_path: Path | None = None):
         self.processed_dir = Path(processed_dir)
+        self.manifest_path = manifest_path or (get_project_root() / "configs" / "chunks_manifest.json")
         self._manifest = self._load_manifest()
 
     # ------------------------------------------------------------------
@@ -39,12 +23,13 @@ class DvcChunkStore:
     # ------------------------------------------------------------------
 
     def _load_manifest(self) -> dict:
-        if MANIFEST_PATH.exists():
-            return json.loads(MANIFEST_PATH.read_text())
+        if self.manifest_path.exists():
+            return json.loads(self.manifest_path.read_text())
         return {"chunks": {}}  # {chunk_name: num_graphs}
 
     def _save_manifest(self) -> None:
-        MANIFEST_PATH.write_text(json.dumps(self._manifest, indent=2))
+        self.manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        self.manifest_path.write_text(json.dumps(self._manifest, indent=2))
 
     # ------------------------------------------------------------------
     # Push (preprocessing → GDrive)
@@ -56,14 +41,9 @@ class DvcChunkStore:
         num_graphs: int,
         delete_local: bool = True,
     ) -> None:
-        """Register chunk in DVC cache, push to GDrive, optionally delete local file.
-
-        Creates a `<chunk>.dvc` pointer file next to the chunk so DVC can
-        later pull the file back from remote.
-        """
         chunk_path = Path(chunk_path)
 
-        # Add to DVC cache — creates chunk_path.dvc pointer file
+        # Add to DVC cache
         subprocess.run(["dvc", "add", str(chunk_path)], check=True)
 
         # Push to GDrive
@@ -105,11 +85,9 @@ class DvcChunkStore:
     # ------------------------------------------------------------------
 
     def list_chunks(self) -> list[str]:
-        """Sorted list of all chunk names available on remote."""
         return sorted(self._manifest["chunks"].keys())
 
     def chunk_size(self, chunk_name: str) -> int:
-        """Number of graphs in the given chunk."""
         return self._manifest["chunks"].get(chunk_name, 0)
 
     def total_graphs(self) -> int:

@@ -7,7 +7,7 @@ from typing import Any
 import torch
 import torch.nn.functional as F
 from pytorch_lightning import LightningModule
-from sklearn.metrics import confusion_matrix, precision_score, recall_score, roc_auc_score
+from sklearn.metrics import confusion_matrix, precision_score, recall_score, roc_auc_score, average_precision_score
 
 from certgnn.baseline.model import GraphPoolingMLP
 
@@ -23,6 +23,7 @@ def _extract_labels(batch: Any) -> torch.Tensor:
 def compute_binary_metrics(y_true: torch.Tensor, y_prob: torch.Tensor) -> dict[str, float]:
     y_true_np = y_true.detach().cpu().numpy().astype(int)
     y_prob_np = y_prob.detach().cpu().numpy().astype(float)
+    
     y_pred_np = (y_prob_np >= 0.5).astype(int)
 
     tn, fp, fn, tp = confusion_matrix(y_true_np, y_pred_np, labels=[0, 1]).ravel()
@@ -32,14 +33,17 @@ def compute_binary_metrics(y_true: torch.Tensor, y_prob: torch.Tensor) -> dict[s
 
     try:
         roc_auc = roc_auc_score(y_true_np, y_prob_np)
+        pr_auc = average_precision_score(y_true_np, y_prob_np) 
     except ValueError:
         roc_auc = float("nan")
+        pr_auc = float("nan")
 
     return {
         "precision": float(precision),
         "recall": float(recall),
         "fpr": float(fpr),
         "roc_auc": float(roc_auc),
+        "pr_auc": float(pr_auc), # Zapis do W&B
         "tn": float(tn),
         "fp": float(fp),
         "fn": float(fn),
@@ -56,6 +60,7 @@ class GraphBaselineLightningModule(LightningModule):
         pooling: str = "mean_max",
         learning_rate: float = 1e-3,
         weight_decay: float = 1e-4,
+        gamma: float = 2.0, # Focal Loss gamma parameter
     ):
         super().__init__()
         self.save_hyperparameters()
@@ -67,6 +72,7 @@ class GraphBaselineLightningModule(LightningModule):
         )
         self.learning_rate = learning_rate
         self.weight_decay = weight_decay
+        self.gamma = gamma
         self._val_outputs: list[dict[str, torch.Tensor]] = []
         self._test_outputs: list[dict[str, torch.Tensor]] = []
 
@@ -76,9 +82,32 @@ class GraphBaselineLightningModule(LightningModule):
     def _shared_step(self, batch, prefix: str):
         logits = self(batch)
         labels = _extract_labels(batch)
-        loss = F.cross_entropy(logits, labels)
+
+        num_negatives = (labels == 0).sum().float()
+        num_positives = (labels == 1).sum().float()
+
+        if num_positives > 0:
+            dynamic_pos_weight = num_negatives / num_positives
+            dynamic_pos_weight = torch.clamp(dynamic_pos_weight, max=1000.0)
+        else:
+            dynamic_pos_weight = torch.tensor(1.0, device=self.device)
+
+        class_weights = torch.tensor([1.0, dynamic_pos_weight], device=self.device)
+        
+        ce_loss = F.cross_entropy(logits, labels, reduction='none')
+        
+        pt = torch.exp(-ce_loss) 
+
+        focal_loss = ((1 - pt) ** self.gamma) * ce_loss
+        
+        weights_for_batch = class_weights[labels]
+        focal_loss = weights_for_batch * focal_loss
+
+        loss = focal_loss.mean()
+        
         probs = torch.softmax(logits, dim=-1)[:, 1]
         batch_size = int(labels.shape[0])
+        
         self.log(
             f"{prefix}/loss",
             loss,

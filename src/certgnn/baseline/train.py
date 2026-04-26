@@ -2,18 +2,16 @@
 
 from __future__ import annotations
 
+import re
 import json
 from pathlib import Path
 
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
+from torch_geometric.loader import DataLoader
 
-from certgnn.baseline.data import (
-    build_dataloader,
-    list_split_chunks,
-    load_processed_metadata,
-)
-from certgnn.chunk_store import DvcChunkStore
+from certgnn.baseline.data import list_split_chunks, load_processed_metadata
+from certgnn.streaming_dataset import SequentialChunkDataset
 from certgnn.baseline.lightning import GraphBaselineLightningModule
 from certgnn.utils import get_project_root, load_config
 
@@ -21,7 +19,6 @@ from certgnn.utils import get_project_root, load_config
 def _load_wandb_logger(project: str, mode: str, name: str):
     try:
         from pytorch_lightning.loggers import WandbLogger
-
         return WandbLogger(project=project, mode=mode, name=name, log_model=False)
     except Exception:
         print("W&B logger unavailable; continuing without experiment logging.")
@@ -33,6 +30,13 @@ def _save_metrics(path: Path, metrics: dict[str, float]) -> None:
     path.write_text(json.dumps(metrics, indent=2, default=float))
 
 
+def _sort_chunks_numerically(chunk_list: list[str]) -> list[str]:
+    def extract_number(filename: str) -> int:
+        match = re.search(r'\d+', filename)
+        return int(match.group()) if match else 0
+    return sorted(chunk_list, key=extract_number)
+
+
 def main() -> None:
     config = load_config()
     baseline_cfg = config.get("baseline", {})
@@ -42,55 +46,22 @@ def main() -> None:
     seed = int(baseline_cfg.get("seed", 42))
     pl.seed_everything(seed, workers=True)
 
-    def _prefetch_chunks(processed_dir: Path, chunk_names: list[str]) -> None:
-        if not chunk_names:
-            return
-        store = DvcChunkStore(processed_dir)
-        print(f"Prefetching {len(chunk_names)} chunks...")
-        for name in chunk_names:
-            store.pull_chunk(name)
-
     metadata = load_processed_metadata(processed_dir)
     batch_size = int(baseline_cfg.get("batch_size", 64))
-    max_local_chunks = int(baseline_cfg.get("max_local_chunks", 2))
-    num_workers = int(baseline_cfg.get("num_workers", 0))
+    
+    num_workers = 0 
 
-    prefetch_chunks = bool(baseline_cfg.get("prefetch_chunks", False))
-    delete_after_eviction = bool(baseline_cfg.get("delete_after_eviction", True))
+    train_chunks = _sort_chunks_numerically(list_split_chunks(processed_dir, "train"))
+    val_chunks = _sort_chunks_numerically(list_split_chunks(processed_dir, "val"))
+    test_chunks = _sort_chunks_numerically(list_split_chunks(processed_dir, "test"))
 
-    if prefetch_chunks:
-        train_chunks = list_split_chunks(processed_dir, "train")
-        val_chunks = list_split_chunks(processed_dir, "val")
-        test_chunks = list_split_chunks(processed_dir, "test")
-        _prefetch_chunks(processed_dir, train_chunks + val_chunks + test_chunks)
+    train_dataset = SequentialChunkDataset(processed_dir, train_chunks, is_training=True)
+    val_dataset = SequentialChunkDataset(processed_dir, val_chunks, is_training=False)
+    test_dataset = SequentialChunkDataset(processed_dir, test_chunks, is_training=False)
 
-    train_loader = build_dataloader(
-        processed_dir=processed_dir,
-        split="train",
-        batch_size=batch_size,
-        max_local_chunks=max_local_chunks,
-        shuffle=True,
-        num_workers=num_workers,
-        delete_after_eviction=False,
-    )
-    val_loader = build_dataloader(
-        processed_dir=processed_dir,
-        split="val",
-        batch_size=batch_size,
-        max_local_chunks=max_local_chunks,
-        shuffle=False,
-        num_workers=num_workers,
-        delete_after_eviction=delete_after_eviction,
-    )
-    test_loader = build_dataloader(
-        processed_dir=processed_dir,
-        split="test",
-        batch_size=batch_size,
-        max_local_chunks=max_local_chunks,
-        shuffle=False,
-        num_workers=num_workers,
-        delete_after_eviction=delete_after_eviction,
-    )
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, num_workers=num_workers)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, num_workers=num_workers)
+    test_loader = DataLoader(test_dataset, batch_size=batch_size, num_workers=num_workers)
 
     model = GraphBaselineLightningModule(
         input_dim=int(metadata["feature_dim"]),
@@ -99,6 +70,7 @@ def main() -> None:
         pooling=str(baseline_cfg.get("pooling", "mean_max")),
         learning_rate=float(baseline_cfg.get("learning_rate", 1e-3)),
         weight_decay=float(baseline_cfg.get("weight_decay", 1e-4)),
+        gamma=float(baseline_cfg.get("gamma", 2.0))
     )
 
     wandb_logger = _load_wandb_logger(
