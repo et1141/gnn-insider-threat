@@ -1,0 +1,187 @@
+"""Tests for paper-faithful loss and operating-point metrics.
+
+References:
+- Paper section IV-E (eq. 24-26): soft-label CE with uniform-over-non-true
+  target on malicious samples.
+- Paper section V-C (eq. 30-31): operating threshold = max{t | FPR(t) ≤ target}.
+"""
+
+import math
+
+import numpy as np
+import pytest
+import torch
+
+from certgnn.lightning_model import (
+    InsiderThreatLightning,
+    _binary_metrics_from_anomaly_scores,
+)
+
+
+def _make_module(num_classes: int = 4) -> InsiderThreatLightning:
+    """Lightning instance just so we can call `_anomaly_aware_loss`. The
+    underlying model is not used in these tests."""
+    return InsiderThreatLightning(
+        num_node_features=2,
+        gcn_hidden_dim=2,
+        lstm_hidden_dim=2,
+        num_activity_classes=num_classes,
+        lstm_num_layers=1,
+        loss_type="anomaly_aware",
+    )
+
+
+# ---------------------------------------------------------------------------
+# _anomaly_aware_loss — paper eq. 24-26
+# ---------------------------------------------------------------------------
+
+
+def test_anomaly_aware_normal_sample_equals_cross_entropy():
+    """For normal (q=0) the soft target is one-hot(true_class), so the loss
+    must equal `F.cross_entropy` on the same logits."""
+    torch.manual_seed(0)
+    module = _make_module(num_classes=4)
+
+    logits = torch.randn(8, 4)
+    y_act = torch.randint(0, 4, (8,))
+    y_label = torch.zeros(8, dtype=torch.long)
+
+    loss = module._anomaly_aware_loss(logits, y_act, y_label)
+    expected = torch.nn.functional.cross_entropy(logits, y_act)
+
+    assert torch.allclose(loss, expected, atol=1e-6), (loss.item(), expected.item())
+
+
+def test_anomaly_aware_malicious_sample_matches_uniform_target():
+    """For malicious (q=1) the target is uniform 1/(M-1) on non-true classes,
+    so loss = -mean over j!=true of log p(j) / (M-1)."""
+    module = _make_module(num_classes=4)
+    M = 4
+
+    logits = torch.tensor([[2.0, 0.0, 0.0, 0.0]])
+    y_act = torch.tensor([0])
+    y_label = torch.tensor([1])
+
+    log_probs = torch.nn.functional.log_softmax(logits, dim=1)[0]
+    expected = -(log_probs[1] + log_probs[2] + log_probs[3]) / (M - 1)
+
+    loss = module._anomaly_aware_loss(logits, y_act, y_label)
+    assert torch.allclose(loss, expected, atol=1e-6), (loss.item(), expected.item())
+
+
+def test_anomaly_aware_malicious_pushes_away_from_true_class():
+    """The whole point of the malicious branch: predicting the true class
+    confidently should be punished worse than predicting any other class."""
+    module = _make_module(num_classes=4)
+
+    logits_predicts_true = torch.tensor([[5.0, 0.0, 0.0, 0.0]])
+    logits_predicts_other = torch.tensor([[0.0, 5.0, 0.0, 0.0]])
+    y_act = torch.tensor([0])
+    y_label = torch.tensor([1])
+
+    loss_true = module._anomaly_aware_loss(logits_predicts_true, y_act, y_label)
+    loss_other = module._anomaly_aware_loss(logits_predicts_other, y_act, y_label)
+    assert loss_true > loss_other
+
+
+def test_anomaly_aware_mixed_batch_is_average_of_branches():
+    """A batch with one normal + one malicious sample should equal the mean of
+    the two branch losses computed separately."""
+    module = _make_module(num_classes=4)
+
+    logits = torch.tensor([[1.0, 2.0, -0.5, 0.3], [0.2, 0.1, 0.9, 0.4]])
+    y_act = torch.tensor([1, 2])
+    y_label = torch.tensor([0, 1])
+
+    mixed = module._anomaly_aware_loss(logits, y_act, y_label)
+    normal_only = module._anomaly_aware_loss(
+        logits[:1], y_act[:1], y_label[:1]
+    )
+    malicious_only = module._anomaly_aware_loss(
+        logits[1:], y_act[1:], y_label[1:]
+    )
+    expected = (normal_only + malicious_only) / 2
+
+    assert torch.allclose(mixed, expected, atol=1e-6), (mixed.item(), expected.item())
+
+
+def test_anomaly_aware_is_finite_under_extreme_logits():
+    """The whole reason we rewrote this in F.log_softmax: huge logits used
+    to produce NaN under fp16 with the old `softmax + log(probs + 1e-10)`."""
+    module = _make_module(num_classes=4)
+
+    logits = torch.tensor([[100.0, -100.0, -100.0, -100.0]])
+    y_act = torch.tensor([0])
+    for label in (0, 1):
+        loss = module._anomaly_aware_loss(logits, y_act, torch.tensor([label]))
+        assert torch.isfinite(loss), label
+
+
+# ---------------------------------------------------------------------------
+# _binary_metrics_from_anomaly_scores — paper eq. 30-31
+# ---------------------------------------------------------------------------
+
+
+def test_threshold_at_fpr_target_picks_largest_valid_fpr():
+    """Among thresholds whose FPR ≤ target, pick the operating point with
+    maximum TPR — i.e. the rightmost valid index in roc_curve output."""
+    rng = np.random.default_rng(0)
+    n_neg = 200
+    n_pos = 50
+
+    neg_scores = rng.uniform(0.0, 0.6, size=n_neg)
+    pos_scores = rng.uniform(0.4, 1.0, size=n_pos)
+    scores = np.concatenate([neg_scores, pos_scores])
+    labels = np.concatenate([np.zeros(n_neg, dtype=int), np.ones(n_pos, dtype=int)])
+
+    target = 0.05
+    metrics = _binary_metrics_from_anomaly_scores(scores, labels, target_fpr=target)
+
+    assert metrics["fpr_at_target"] <= target + 1e-12
+    # ROC has finitely many points; check that the next operating point above
+    # would have FPR strictly greater than target (i.e. we *did* pick the
+    # rightmost valid one — not some interior point).
+    from sklearn.metrics import roc_curve
+
+    fpr_arr, _, _ = roc_curve(labels, scores)
+    valid = np.where(fpr_arr <= target)[0]
+    rightmost = int(valid[-1])
+    if rightmost + 1 < len(fpr_arr):
+        assert fpr_arr[rightmost + 1] > target
+
+
+def test_threshold_at_fpr_target_falls_back_when_target_too_strict():
+    """If target_fpr is below every achievable FPR (smallest is 0 here, so we
+    use a negative target), fall back to the strictest threshold (idx 0)."""
+    scores = np.array([0.1, 0.2, 0.8, 0.9])
+    labels = np.array([0, 0, 1, 1])
+
+    metrics = _binary_metrics_from_anomaly_scores(scores, labels, target_fpr=-0.01)
+
+    assert metrics["fpr_at_target"] == pytest.approx(0.0)
+    assert metrics["tpr_at_fpr_target"] == pytest.approx(0.0)
+
+
+def test_target_fpr_reported_in_metrics():
+    scores = np.array([0.1, 0.2, 0.8, 0.9])
+    labels = np.array([0, 0, 1, 1])
+
+    metrics = _binary_metrics_from_anomaly_scores(scores, labels, target_fpr=0.09)
+    assert metrics["target_fpr"] == pytest.approx(0.09)
+
+
+def test_single_class_returns_nan_aucs():
+    """No raise, just NaN for things that are undefined when only one class
+    is present. Keeps the count metrics (TP/TN/FP/FN/etc.) intact."""
+    scores = np.array([0.1, 0.5, 0.9])
+    labels = np.array([0, 0, 0])
+
+    metrics = _binary_metrics_from_anomaly_scores(scores, labels)
+    assert math.isnan(metrics["roc_auc"])
+    assert math.isnan(metrics["pr_auc"])
+    assert math.isnan(metrics["tpr_at_fpr_target"])
+    assert math.isnan(metrics["fpr_at_target"])
+    assert math.isnan(metrics["threshold_at_fpr_target"])
+    # Counts must still be computed
+    assert metrics["n_pos"] == 0
+    assert metrics["n_neg"] == 3

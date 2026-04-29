@@ -6,14 +6,98 @@ for malicious examples, push model to flag anomalies via low confidence.
 """
 
 import gc
+import math
 
 import numpy as np
 import torch
 import torch.nn.functional as F
-from sklearn.metrics import roc_auc_score, roc_curve
+from loguru import logger
+from sklearn.metrics import (
+    average_precision_score,
+    confusion_matrix,
+    roc_auc_score,
+    roc_curve,
+)
 import pytorch_lightning as pl
 
 from certgnn.model import GCNLSTMInsiderThreat
+
+
+def _binary_metrics_from_anomaly_scores(
+    scores: np.ndarray,
+    labels: np.ndarray,
+    threshold: float = 0.5,
+    target_fpr: float = 0.05,
+) -> dict[str, float]:
+    """Compute binary classification metrics from anomaly scores.
+
+    The model outputs softmax probabilities over activity classes. We use
+    `1 - p(true_class)` as the anomaly score: low confidence in the true
+    activity = more anomalous. Binary label: 0 = normal, 1 = malicious.
+
+    Returns NaN for ROC/PR-AUC when only one class is present (instead of
+    raising) so the caller can still log all the count metrics.
+
+    Args:
+        scores: float array of anomaly scores, higher = more anomalous.
+        labels: int array of binary ground truth (0/1).
+        threshold: classification threshold on the anomaly score.
+        target_fpr: target false-positive rate at which to report TPR. Paper
+            section V-C uses 0.05 for r5.2 and 0.09 for r6.2; pick the
+            largest threshold whose FPR is still ≤ target_fpr (eq. 30-31).
+    """
+    labels = labels.astype(int)
+    scores = scores.astype(float)
+    n_pos = int((labels == 1).sum())
+    n_neg = int((labels == 0).sum())
+    n_total = labels.size
+
+    out: dict[str, float] = {
+        "n_pos": float(n_pos),
+        "n_neg": float(n_neg),
+        "pos_frac": float(n_pos) / max(1, n_total),
+    }
+
+    preds = (scores >= threshold).astype(int)
+    tn, fp, fn, tp = confusion_matrix(labels, preds, labels=[0, 1]).ravel()
+    out.update({
+        "tp": float(tp),
+        "tn": float(tn),
+        "fp": float(fp),
+        "fn": float(fn),
+    })
+
+    out["accuracy"] = (tp + tn) / max(1, n_total)
+    out["precision"] = tp / max(1, tp + fp)
+    out["recall"] = tp / max(1, tp + fn)
+    out["fpr"] = fp / max(1, fp + tn)
+    out["tpr"] = out["recall"]
+
+    out["target_fpr"] = float(target_fpr)
+    if n_pos > 0 and n_neg > 0:
+        out["roc_auc"] = float(roc_auc_score(labels, scores))
+        out["pr_auc"] = float(average_precision_score(labels, scores))
+        fpr_arr, tpr_arr, thresh_arr = roc_curve(labels, scores)
+        # Paper eq. 30-31: t_optimal = max{t | FPR(t) ≤ target}. roc_curve
+        # returns thresholds in decreasing order and fpr_arr ascending, so
+        # the rightmost index where fpr is still ≤ target is the operating
+        # point with maximum TPR meeting the FPR constraint. If no point
+        # satisfies the constraint (target_fpr smaller than the smallest
+        # achievable FPR), fall back to the strictest threshold (idx 0,
+        # FPR=0).
+        valid = np.where(fpr_arr <= target_fpr)[0]
+        idx = int(valid[-1]) if valid.size > 0 else 0
+        out["tpr_at_fpr_target"] = float(tpr_arr[idx])
+        out["fpr_at_target"] = float(fpr_arr[idx])
+        out["threshold_at_fpr_target"] = float(thresh_arr[idx])
+    else:
+        out["roc_auc"] = math.nan
+        out["pr_auc"] = math.nan
+        out["tpr_at_fpr_target"] = math.nan
+        out["fpr_at_target"] = math.nan
+        out["threshold_at_fpr_target"] = math.nan
+
+    return out
 
 
 class InsiderThreatLightning(pl.LightningModule):
@@ -37,7 +121,14 @@ class InsiderThreatLightning(pl.LightningModule):
         lstm_num_layers: int = 2,
         learning_rate: float = 1e-3,
         weight_decay: float = 1e-5,
-        loss_type: str = "standard",  # "standard" (from paper) or "anomaly_aware" (custom)
+        # "anomaly_aware" implements paper eq. 24-26 (recommended);
+        # "standard" is plain F.cross_entropy on true class — useful as a
+        # debug baseline but ignores y_label so malicious samples train the
+        # model to predict the true class (opposite of paper's intent).
+        loss_type: str = "standard",
+        # Paper section V-C uses 0.05 for r5.2 and 0.09 for r6.2; override
+        # via train.py --target-fpr when running on r6.2.
+        target_fpr: float = 0.05,
     ):
         super().__init__()
         self.save_hyperparameters()
@@ -52,127 +143,146 @@ class InsiderThreatLightning(pl.LightningModule):
         self.learning_rate = learning_rate
         self.weight_decay = weight_decay
         self.num_activity_classes = num_activity_classes
-        self.loss_type = loss_type  # "standard" or "anomaly_aware"
+        self.loss_type = loss_type
+        self.target_fpr = target_fpr
 
-        # For collecting outputs during val/test
-        self.val_preds = []
-        self.val_labels = []
-        self.test_preds = []
-        self.test_labels = []
+        self.val_preds: list[torch.Tensor] = []
+        self.val_labels: list[torch.Tensor] = []
+        self.test_preds: list[torch.Tensor] = []
+        self.test_labels: list[torch.Tensor] = []
+        # One-shot warning so we don't spam the log when val has only one class
+        self._warned_single_class_val = False
+        self._warned_single_class_test = False
 
     def forward(self, batch_data):
-        """Forward pass."""
         return self.model(batch_data)
 
     def _anomaly_aware_loss(self, logits, y_act, y_label):
-        """Custom loss that handles malicious examples specially.
+        """Soft-label cross-entropy from paper section IV-E (eq. 24-26).
 
-        For normal (y_label=0): standard CE on true activity
-        For malicious (y_label=1): target is uniform over all activities except true one
+        Builds the soft target distribution Y' for each sample:
+        - Normal (y_label=0): Y' = one-hot(true_class) → standard CE on the
+          true activity.
+        - Malicious (y_label=1): Y' = uniform over all classes EXCEPT the true
+          class (mass 1/(M−1) on each non-true class). Pushes the model AWAY
+          from predicting the true class on malicious samples; the residual
+          confidence in the true class then becomes the anomaly signal used
+          at inference (low p(true) → flagged).
+
+        Equivalent vectorised form of paper eq. 24:
+            Y' = Y ⊙ (1 − Ω) + (1 / (M − 1)) · (1 − Y) ⊙ Ω
+        where Y = one-hot(true_class), Ω_i = y_label_i broadcast across
+        the class dimension, M = num activity classes.
+
+        Implementation uses F.log_softmax + soft-label NLL so the loss stays
+        stable under bf16/fp16 autocast (no log(p + eps) underflow that the
+        previous "softmax + log(probs + 1e-10)" formulation suffered from
+        on RTX 3090 with 16-mixed).
         """
-        batch_size = logits.size(0)
         num_classes = logits.size(1)
 
-        # Validate that y_act indices are within bounds
         max_activity = y_act.max().item()
         if max_activity >= num_classes:
             raise RuntimeError(
                 f"Activity index {max_activity} >= num_classes {num_classes}. "
-                f"This likely means metadata has {num_classes} classes but data has indices up to {max_activity}. "
-                f"Check: metadata['num_classes'] = {num_classes}, max(y_act) = {max_activity}"
+                f"Check metadata['num_classes'] = {num_classes}, max(y_act) = {max_activity}"
             )
 
-        # Get softmax probabilities
-        probs = F.softmax(logits, dim=1)  # [batch, num_classes]
+        Y = F.one_hot(y_act, num_classes).to(logits.dtype)
+        omega = (y_label > 0).to(logits.dtype).unsqueeze(1)
+        Y_prime = Y * (1.0 - omega) + (1.0 - Y) / (num_classes - 1) * omega
 
-        # Initialize target distribution
-        target = probs.clone()  # [batch, num_classes]
-
-        # One-hot encode true activity classes
-        true_class_onehot = F.one_hot(y_act, num_classes).bool()  # [batch, num_classes]
-
-        # Malicious mask
-        is_malicious = (y_label > 0).unsqueeze(1)  # [batch, 1]
-
-        # For malicious samples: zero out the true class
-        target[is_malicious.squeeze(1)] = 0.0
-
-        # Create uniform distribution over remaining classes
-        # (for malicious: uniform over num_classes-1; for normal: keep original)
-        uniform = torch.ones_like(probs) / (num_classes - 1)
-        uniform[true_class_onehot] = 0.0  # don't count the true class in uniform
-
-        # Replace malicious targets with uniform
-        target[is_malicious.squeeze(1)] = uniform[is_malicious.squeeze(1)]
-
-        # Normalize if needed
-        row_sums = target.sum(dim=1, keepdim=True)
-        target = torch.where(row_sums > 0, target / row_sums, target)
-
-        # Cross-entropy: -sum(target * log(probs))
-        log_probs = torch.log(probs + 1e-10)
-        loss = -(target * log_probs).sum(dim=1).mean()
-
+        log_probs = F.log_softmax(logits, dim=1)
+        loss = -(Y_prime * log_probs).sum(dim=1).mean()
         return loss
 
     def _standard_loss(self, logits, y_act):
-        """Standard cross-entropy loss from the paper.
-
-        This is the original loss used in the paper:
-        L = -∑ log(P(y_act | logits))
-        """
+        """Standard cross-entropy loss from the paper."""
         return F.cross_entropy(logits, y_act)
 
-    def training_step(self, batch, batch_idx):
-        """Training step on a batch."""
-        logits = self.forward(batch)
-
+    def _compute_loss(self, logits, batch):
         if self.loss_type == "standard":
-            loss = self._standard_loss(logits, batch.y_act)
-        elif self.loss_type == "anomaly_aware":
-            loss = self._anomaly_aware_loss(logits, batch.y_act, batch.y_label)
-        else:
-            raise ValueError(f"Unknown loss_type: {self.loss_type}")
+            return self._standard_loss(logits, batch.y_act)
+        if self.loss_type == "anomaly_aware":
+            return self._anomaly_aware_loss(logits, batch.y_act, batch.y_label)
+        raise ValueError(f"Unknown loss_type: {self.loss_type}")
+
+    def training_step(self, batch, batch_idx):
+        logits = self.forward(batch)
+        loss = self._compute_loss(logits, batch)
 
         batch_size = batch.y_act.shape[0]
-        self.log("train_loss", loss, on_epoch=True, on_step=False, prog_bar=True, batch_size=batch_size)
+        # on_step=True: per-batch loss curve in W&B (epochs are 20+ min, otherwise
+        # we'd see one point per epoch). on_epoch=True: still aggregate per-epoch
+        # for ReduceLROnPlateau / EarlyStopping clients.
+        self.log(
+            "train_loss",
+            loss,
+            on_step=True,
+            on_epoch=True,
+            prog_bar=True,
+            batch_size=batch_size,
+        )
         return loss
 
     def validation_step(self, batch, batch_idx):
-        """Validation step (collect outputs for AUC calculation)."""
         logits = self.forward(batch)
-        loss = self._anomaly_aware_loss(logits, batch.y_act, batch.y_label)
+        loss = self._compute_loss(logits, batch)
 
-        # Get probabilities and scores
-        probs = F.softmax(logits, dim=1)  # [batch_size, num_activity_classes]
-        scores = probs.gather(1, batch.y_act.unsqueeze(1)).squeeze(1)  # [batch_size]
+        probs = F.softmax(logits, dim=1)
+        scores = probs.gather(1, batch.y_act.unsqueeze(1)).squeeze(1)
 
-        # Collect for epoch-end AUC
         self.val_preds.append(scores.detach().cpu())
         self.val_labels.append(batch.y_label.detach().cpu())
 
         batch_size = batch.y_act.shape[0]
         self.log("val_loss", loss, on_epoch=True, on_step=False, prog_bar=True, batch_size=batch_size)
 
-    def on_validation_epoch_end(self):
-        """Calculate AUC at end of validation epoch."""
-        if len(self.val_preds) == 0:
+    def _log_eval_metrics(
+        self,
+        prefix: str,
+        preds: list[torch.Tensor],
+        labels: list[torch.Tensor],
+        warned_attr: str,
+    ) -> None:
+        if len(preds) == 0:
             return
 
-        preds = torch.cat(self.val_preds).numpy()
-        labels = torch.cat(self.val_labels).numpy()
+        preds_np = torch.cat(preds).float().numpy()
+        labels_np = torch.cat(labels).int().numpy()
 
-        # Anomaly score: LOW confidence in true activity = anomalous
-        # So we need to invert: anomaly_score = 1 - probability
-        anomaly_scores = 1 - preds
+        # Low confidence in true activity = anomalous
+        anomaly_scores = 1.0 - preds_np
 
-        try:
-            auc = roc_auc_score(labels, anomaly_scores)
-            self.log("val_auc", auc, on_epoch=True, prog_bar=True, batch_size=len(labels))
-        except ValueError:
-            # Happens if only one class in batch
-            pass
+        metrics = _binary_metrics_from_anomaly_scores(
+            anomaly_scores, labels_np, target_fpr=self.target_fpr
+        )
 
+        n_pos = int(metrics["n_pos"])
+        n_neg = int(metrics["n_neg"])
+        if (n_pos == 0 or n_neg == 0) and not getattr(self, warned_attr):
+            logger.warning(
+                f"{prefix} set has only one class (n_pos={n_pos}, n_neg={n_neg}); "
+                "ROC/PR-AUC will be NaN. Likely caused by current RandomSplit + skewed "
+                "user fractions in configs/config.yaml."
+            )
+            setattr(self, warned_attr, True)
+
+        # Legacy names kept so EarlyStopping/ModelCheckpoint monitors keep working
+        if not math.isnan(metrics["roc_auc"]):
+            self.log(f"{prefix}_auc", metrics["roc_auc"], on_epoch=True, prog_bar=True, batch_size=len(labels_np))
+
+        # Namespaced metrics for the W&B dashboard
+        for key, value in metrics.items():
+            self.log(f"{prefix}/{key}", value, on_epoch=True, batch_size=len(labels_np))
+
+    def on_validation_epoch_end(self):
+        self._log_eval_metrics(
+            prefix="val",
+            preds=self.val_preds,
+            labels=self.val_labels,
+            warned_attr="_warned_single_class_val",
+        )
         self.val_preds.clear()
         self.val_labels.clear()
 
@@ -181,42 +291,19 @@ class InsiderThreatLightning(pl.LightningModule):
             torch.mps.empty_cache()
 
     def test_step(self, batch, batch_idx):
-        """Test step (same as validation)."""
         logits = self.forward(batch)
-
         probs = F.softmax(logits, dim=1)
         scores = probs.gather(1, batch.y_act.unsqueeze(1)).squeeze(1)
-
         self.test_preds.append(scores.detach().cpu())
         self.test_labels.append(batch.y_label.detach().cpu())
 
     def on_test_epoch_end(self):
-        """Calculate final AUC on test set."""
-        if len(self.test_preds) == 0:
-            return
-
-        preds = torch.cat(self.test_preds).numpy()
-        labels = torch.cat(self.test_labels).numpy()
-
-        anomaly_scores = 1 - preds
-
-        try:
-            auc = roc_auc_score(labels, anomaly_scores)
-            fpr, tpr, thresholds = roc_curve(labels, anomaly_scores)
-
-            # Find optimal threshold at target FPR ~16% (as in paper)
-            target_fpr = 0.16
-            idx = np.argmin(np.abs(fpr - target_fpr))
-            optimal_threshold = thresholds[idx]
-            optimal_tpr = tpr[idx]
-            optimal_fpr = fpr[idx]
-
-            self.log("test_auc", auc, batch_size=len(labels))
-            self.log("test_tpr_at_16fpr", float(optimal_tpr), batch_size=len(labels))
-            self.log("test_fpr_at_threshold", float(optimal_fpr), batch_size=len(labels))
-        except ValueError:
-            pass
-
+        self._log_eval_metrics(
+            prefix="test",
+            preds=self.test_preds,
+            labels=self.test_labels,
+            warned_attr="_warned_single_class_test",
+        )
         self.test_preds.clear()
         self.test_labels.clear()
 
@@ -226,7 +313,6 @@ class InsiderThreatLightning(pl.LightningModule):
             torch.mps.empty_cache()
 
     def configure_optimizers(self):
-        """Configure optimizer and learning rate scheduler."""
         optimizer = torch.optim.Adam(
             self.parameters(),
             lr=self.learning_rate,
@@ -239,7 +325,3 @@ class InsiderThreatLightning(pl.LightningModule):
             "optimizer": optimizer,
             "lr_scheduler": {"scheduler": scheduler, "monitor": "val_loss"},
         }
-
-
-# Import numpy for threshold calculation
-import numpy as np

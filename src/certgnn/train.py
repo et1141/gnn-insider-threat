@@ -156,9 +156,48 @@ def main():
     )
     parser.add_argument(
         "--num-workers", type=int, default=1,
-        help="DataLoader worker processes. With persistent_workers=False, each "
-             "phase respawns workers — kernel reclaims their full memory between "
-             "phases, which is the only reliable way to bound heap on Apple Silicon.",
+        help="DataLoader worker processes. Use 0 on shared servers where worker "
+             "subprocesses get OOM-killed. Use 1 on macOS (workers die per phase, "
+             "kernel reclaims heap). Use 2-6 on SLURM/dedicated NVIDIA nodes.",
+    )
+    parser.add_argument(
+        "--max-local-chunks", type=int, default=None,
+        help="How many chunk files to keep loaded in RAM at once (per worker). "
+             "Auto-detected from available/cgroup memory if not set. Override "
+             "explicitly when auto-detection picks wrong value on shared machines.",
+    )
+    parser.add_argument(
+        "--prefetch-factor", type=int, default=None,
+        help="DataLoader prefetch_factor (batches each worker prefetches). "
+             "Default: 4 on CUDA, 2 elsewhere. Ignored when --num-workers=0.",
+    )
+    parser.add_argument(
+        "--persistent-workers", choices=["auto", "true", "false"], default="auto",
+        help="Keep DataLoader workers alive between phases. 'auto' = True on "
+             "CUDA (with workers>0), False on MPS (heap doesn't shrink between "
+             "epochs on macOS). Force 'true' on dedicated CUDA nodes if you want "
+             "to skip phase-respawn cost.",
+    )
+    parser.add_argument(
+        "--log-every-n-steps", type=int, default=50,
+        help="Lightning's log_every_n_steps. With bs=512 a value of 50 is a "
+             "log per ~25k samples — frequent enough to see live train_loss "
+             "without flooding W&B.",
+    )
+    parser.add_argument(
+        "--target-fpr", type=float, default=0.05,
+        help="Target false-positive rate at which val/test report TPR. Paper "
+             "section V-C uses 0.05 for r5.2 and 0.09 for r6.2; metric is "
+             "logged as val/tpr_at_fpr_target and test/tpr_at_fpr_target.",
+    )
+    parser.add_argument(
+        "--loss-type", choices=["standard", "anomaly_aware"], default="standard",
+        help="'anomaly_aware' implements paper eq. 24-26 (one-hot CE for "
+             "normal, uniform-over-non-true for malicious — recommended for "
+             "paper-faithful runs). 'standard' is plain F.cross_entropy on "
+             "the true class — useful as a debug baseline but ignores "
+             "y_label, so malicious samples train the model to predict the "
+             "true class (opposite of paper's intent).",
     )
     parser.add_argument(
         "--wandb-project", type=str, default="gnn-insider-threat", help="W&B project name"
@@ -186,7 +225,13 @@ def main():
     else:
         accelerator, devices = "cpu", "auto"
 
-    precision = "16-mixed" if accelerator == "gpu" else "32-true"
+    # Auto-precision. fp16-mixed on the 53k-param GCN+LSTM with CE on 192/216
+    # classes overflows on RTX 3090 (NaN losses). bf16-mixed has fp32-range
+    # exponent so it doesn't overflow; almost as fast as fp16 on Ampere.
+    if accelerator == "gpu" and torch.cuda.is_available() and torch.cuda.is_bf16_supported():
+        precision = "bf16-mixed"
+    else:
+        precision = "32-true"
 
     if accelerator == "gpu":
         torch.set_float32_matmul_precision("medium")
@@ -215,21 +260,34 @@ def main():
                 "num_activity_classes": num_activity_classes,
                 "num_activity_types": num_activity_types,
                 "processed_dir": str(processed_dir),
+                "loss_type": args.loss_type,
+                "target_fpr": args.target_fpr,
             },
         )
 
     split = RandomSplit(val_size=args.val_size, test_size=args.test_size, seed=args.seed)
+
+    if args.persistent_workers == "auto":
+        persistent_workers = None
+    else:
+        persistent_workers = args.persistent_workers == "true"
 
     datamodule = InsiderThreatDataModule(
         processed_dir=processed_dir,
         split_strategy=split,
         batch_size=args.batch_size,
         num_workers=args.num_workers,
+        max_local_chunks=args.max_local_chunks,
+        persistent_workers=persistent_workers,
+        prefetch_factor=args.prefetch_factor,
+        accelerator=accelerator,
     )
 
     model = InsiderThreatLightning(
         learning_rate=args.learning_rate,
         num_activity_classes=num_activity_classes,
+        loss_type=args.loss_type,
+        target_fpr=args.target_fpr,
     )
 
     checkpoint_callback = ModelCheckpoint(
@@ -259,7 +317,7 @@ def main():
         precision=precision,
         logger=wandb_logger,
         enable_progress_bar=True,
-        log_every_n_steps=10,
+        log_every_n_steps=args.log_every_n_steps,
     )
 
     trainer.fit(model, datamodule=datamodule)
