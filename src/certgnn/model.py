@@ -28,6 +28,24 @@ class GCN(nn.Module):
         self.conv2 = GCNConv(hidden_dim, hidden_dim)
         self.hidden_dim = hidden_dim
 
+    @staticmethod
+    def _stabilize_input_features(x: torch.Tensor) -> torch.Tensor:
+        """Keep feature scale numerically safe for mixed precision.
+
+        Raw CERT counters can reach millions. On bf16/fp16 this makes the first
+        GCN layer produce extreme activations and training quickly diverges to
+        NaN. We therefore:
+        1) replace NaN/inf with finite sentinels,
+        2) clamp to a reasonable upper bound,
+        3) compress dynamic range with log1p,
+        4) apply per-node layer norm over 54 features.
+        """
+        x = torch.nan_to_num(x, nan=0.0, posinf=1e6, neginf=0.0)
+        x = torch.clamp(x, min=0.0, max=1e6)
+        x = torch.log1p(x)
+        x = F.layer_norm(x, (x.size(-1),))
+        return x
+
     def forward(self, data):
         """Forward pass on batched graph data.
 
@@ -39,6 +57,7 @@ class GCN(nn.Module):
             Node embeddings [total_nodes, hidden_dim]
         """
         x, edge_index = data.x, data.edge_index
+        x = self._stabilize_input_features(x)
 
         # Layer 1: GCN + ReLU + Dropout
         x = F.relu(self.conv1(x, edge_index))

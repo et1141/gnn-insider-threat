@@ -18,6 +18,7 @@ import pickle
 import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytorch_lightning as pl
@@ -73,6 +74,26 @@ def _proc_memory_metrics() -> dict:
     return metrics
 
 
+def _cgroup_memory_metrics() -> dict:
+    """Return cgroup memory usage/limit when available (Linux/SLURM)."""
+    metrics: dict = {}
+    try:
+        usage_path = Path("/sys/fs/cgroup/memory.current")
+        limit_path = Path("/sys/fs/cgroup/memory.max")
+        if usage_path.exists() and limit_path.exists():
+            used = int(usage_path.read_text().strip())
+            raw_limit = limit_path.read_text().strip()
+            if raw_limit != "max":
+                limit = int(raw_limit)
+                if limit > 0:
+                    metrics["proc/cgroup_used_gb"] = used / 1024**3
+                    metrics["proc/cgroup_limit_gb"] = limit / 1024**3
+                    metrics["proc/cgroup_used_pct"] = 100.0 * used / limit
+    except Exception:
+        pass
+    return metrics
+
+
 class GPUMetricsCallback(pl.Callback):
     """Log GPU + process memory to W&B at epoch end; flush MPS pool mid-epoch.
 
@@ -99,23 +120,52 @@ class GPUMetricsCallback(pl.Callback):
 
         metrics: dict = {}
         if device.type == "mps":
-            metrics["gpu/allocated_gb"] = torch.mps.current_allocated_memory() / 1024**3
-            metrics["gpu/driver_gb"] = torch.mps.driver_allocated_memory() / 1024**3
+            metrics["gpu/main/allocated_gb"] = torch.mps.current_allocated_memory() / 1024**3
+            metrics["gpu/detail/driver_gb"] = torch.mps.driver_allocated_memory() / 1024**3
         elif device.type == "cuda":
             idx = device.index or 0
-            metrics["gpu/allocated_gb"] = torch.cuda.memory_allocated(idx) / 1024**3
-            metrics["gpu/reserved_gb"] = torch.cuda.memory_reserved(idx) / 1024**3
+            metrics["gpu/main/allocated_gb"] = torch.cuda.memory_allocated(idx) / 1024**3
+            metrics["gpu/main/reserved_gb"] = torch.cuda.memory_reserved(idx) / 1024**3
+            total_mem = torch.cuda.get_device_properties(idx).total_memory / 1024**3
+            metrics["gpu/main/total_gb"] = total_mem
+            metrics["gpu/main/allocated_pct"] = 100.0 * metrics["gpu/main/allocated_gb"] / max(total_mem, 1e-12)
+            metrics["gpu/main/reserved_pct"] = 100.0 * metrics["gpu/main/reserved_gb"] / max(total_mem, 1e-12)
+            try:
+                free_b, total_b = torch.cuda.mem_get_info(idx)
+                metrics["gpu/main/free_gb"] = free_b / 1024**3
+                metrics["gpu/main/used_pct"] = 100.0 * (1.0 - (free_b / max(total_b, 1)))
+            except Exception:
+                pass
             try:
                 import pynvml
                 pynvml.nvmlInit()
                 handle = pynvml.nvmlDeviceGetHandleByIndex(idx)
-                metrics["gpu/utilization_pct"] = float(pynvml.nvmlDeviceGetUtilizationRates(handle).gpu)
-                metrics["gpu/vram_used_gb"] = pynvml.nvmlDeviceGetMemoryInfo(handle).used / 1024**3
+                metrics["gpu/main/utilization_pct"] = float(pynvml.nvmlDeviceGetUtilizationRates(handle).gpu)
+                mem_info = pynvml.nvmlDeviceGetMemoryInfo(handle)
+                metrics["gpu/detail/vram_used_gb"] = mem_info.used / 1024**3
+                metrics["gpu/detail/vram_used_pct"] = 100.0 * mem_info.used / max(mem_info.total, 1)
             except Exception:
                 pass
 
         metrics.update(_proc_memory_metrics())
+        metrics.update(_cgroup_memory_metrics())
         trainer.logger.log_metrics(metrics, step=trainer.global_step)
+
+
+class EpochTimingCallback(pl.Callback):
+    """Log wall-clock train epoch duration to W&B."""
+
+    def __init__(self) -> None:
+        self._epoch_start_time: float | None = None
+
+    def on_train_epoch_start(self, trainer, pl_module) -> None:
+        self._epoch_start_time = time.perf_counter()
+
+    def on_train_epoch_end(self, trainer, pl_module) -> None:
+        if trainer.logger is None or self._epoch_start_time is None:
+            return
+        epoch_sec = time.perf_counter() - self._epoch_start_time
+        trainer.logger.log_metrics({"time/epoch_train_sec": epoch_sec}, step=trainer.global_step)
 
 from certgnn.datamodule import InsiderThreatDataModule
 from certgnn.lightning_model import InsiderThreatLightning
@@ -155,6 +205,13 @@ def main():
         "--gpu", type=int, default=None, help="GPU device (0, 1, ...). None = CPU"
     )
     parser.add_argument(
+        "--precision-mode",
+        choices=["auto", "32", "bf16"],
+        default="auto",
+        help="'auto' picks bf16 on supported CUDA, else fp32. Use '32' to force "
+             "full precision for NaN debugging, or 'bf16' to force bf16 on CUDA.",
+    )
+    parser.add_argument(
         "--num-workers", type=int, default=1,
         help="DataLoader worker processes. Use 0 on shared servers where worker "
              "subprocesses get OOM-killed. Use 1 on macOS (workers die per phase, "
@@ -189,6 +246,13 @@ def main():
         help="Target false-positive rate at which val/test report TPR. Paper "
              "section V-C uses 0.05 for r5.2 and 0.09 for r6.2; metric is "
              "logged as val/tpr_at_fpr_target and test/tpr_at_fpr_target.",
+    )
+    parser.add_argument(
+        "--gradient-clip-val",
+        type=float,
+        default=1.0,
+        help="Global gradient norm clipping value. Helps avoid NaN divergence "
+             "on large unnormalized feature spikes, especially with mixed precision.",
     )
     parser.add_argument(
         "--loss-type", choices=["standard", "anomaly_aware"], default="standard",
@@ -228,7 +292,11 @@ def main():
     # Auto-precision. fp16-mixed on the 53k-param GCN+LSTM with CE on 192/216
     # classes overflows on RTX 3090 (NaN losses). bf16-mixed has fp32-range
     # exponent so it doesn't overflow; almost as fast as fp16 on Ampere.
-    if accelerator == "gpu" and torch.cuda.is_available() and torch.cuda.is_bf16_supported():
+    if args.precision_mode == "32":
+        precision = "32-true"
+    elif args.precision_mode == "bf16":
+        precision = "bf16-mixed"
+    elif accelerator == "gpu" and torch.cuda.is_available() and torch.cuda.is_bf16_supported():
         precision = "bf16-mixed"
     else:
         precision = "32-true"
@@ -305,7 +373,12 @@ def main():
         mode="min",
     )
 
-    callbacks = [checkpoint_callback, early_stop_callback, RichProgressBar()]
+    callbacks = [
+        checkpoint_callback,
+        early_stop_callback,
+        RichProgressBar(),
+        EpochTimingCallback(),
+    ]
     if accelerator in ("mps", "gpu"):
         callbacks.append(GPUMetricsCallback())
 
@@ -315,6 +388,8 @@ def main():
         accelerator=accelerator,
         devices=devices,
         precision=precision,
+        gradient_clip_algorithm="norm",
+        gradient_clip_val=args.gradient_clip_val,
         logger=wandb_logger,
         enable_progress_bar=True,
         log_every_n_steps=args.log_every_n_steps,
