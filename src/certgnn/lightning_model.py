@@ -38,6 +38,12 @@ def _binary_metrics_from_anomaly_scores(
     Returns NaN for ROC/PR-AUC when only one class is present (instead of
     raising) so the caller can still log all the count metrics.
 
+    Non-finite scores (NaN/inf — typically from NaN logits in the model
+    forward pass) are filtered out before any metric is computed, and the
+    count of dropped samples is exposed as `n_nonfinite` so the caller can
+    surface it (e.g., to W&B) and warn. If every score is non-finite,
+    every metric except the counts is NaN.
+
     Args:
         scores: float array of anomaly scores, higher = more anomalous.
         labels: int array of binary ground truth (0/1).
@@ -48,6 +54,19 @@ def _binary_metrics_from_anomaly_scores(
     """
     labels = labels.astype(int)
     scores = scores.astype(float)
+
+    # Filter out non-finite scores (NaN/inf). They typically signal a NaN
+    # logit somewhere in the forward pass (e.g., NaN in batch.x, bf16 softmax
+    # overflow on extreme logits, GCN normalisation on isolated nodes).
+    # roc_auc_score raises on non-finite input, so without this guard the
+    # whole epoch_end blows up. Surface the count via `n_nonfinite` so the
+    # failure mode is visible in W&B instead of silenced.
+    finite_mask = np.isfinite(scores)
+    n_nonfinite = int((~finite_mask).sum())
+    if n_nonfinite > 0:
+        scores = scores[finite_mask]
+        labels = labels[finite_mask]
+
     n_pos = int((labels == 1).sum())
     n_neg = int((labels == 0).sum())
     n_total = labels.size
@@ -55,8 +74,21 @@ def _binary_metrics_from_anomaly_scores(
     out: dict[str, float] = {
         "n_pos": float(n_pos),
         "n_neg": float(n_neg),
+        "n_nonfinite": float(n_nonfinite),
         "pos_frac": float(n_pos) / max(1, n_total),
+        "target_fpr": float(target_fpr),
     }
+
+    if n_total == 0:
+        # All samples had non-finite scores; nothing meaningful to compute.
+        for k in (
+            "tp", "tn", "fp", "fn",
+            "accuracy", "precision", "recall", "fpr", "tpr",
+            "roc_auc", "pr_auc",
+            "tpr_at_fpr_target", "fpr_at_target", "threshold_at_fpr_target",
+        ):
+            out[k] = math.nan
+        return out
 
     preds = (scores >= threshold).astype(int)
     tn, fp, fn, tp = confusion_matrix(labels, preds, labels=[0, 1]).ravel()
@@ -73,7 +105,6 @@ def _binary_metrics_from_anomaly_scores(
     out["fpr"] = fp / max(1, fp + tn)
     out["tpr"] = out["recall"]
 
-    out["target_fpr"] = float(target_fpr)
     if n_pos > 0 and n_neg > 0:
         out["roc_auc"] = float(roc_auc_score(labels, scores))
         out["pr_auc"] = float(average_precision_score(labels, scores))
@@ -150,9 +181,13 @@ class InsiderThreatLightning(pl.LightningModule):
         self.val_labels: list[torch.Tensor] = []
         self.test_preds: list[torch.Tensor] = []
         self.test_labels: list[torch.Tensor] = []
-        # One-shot warning so we don't spam the log when val has only one class
+        # One-shot warnings so we don't spam the log on every epoch:
+        # - single_class: val/test set degenerated to one class (no AUC).
+        # - nan_scores:   model produced NaN logits → NaN scores collected.
         self._warned_single_class_val = False
         self._warned_single_class_test = False
+        self._warned_nan_scores_val = False
+        self._warned_nan_scores_test = False
 
     def forward(self, batch_data):
         return self.model(batch_data)
@@ -243,13 +278,15 @@ class InsiderThreatLightning(pl.LightningModule):
         prefix: str,
         preds: list[torch.Tensor],
         labels: list[torch.Tensor],
-        warned_attr: str,
+        warned_single_class_attr: str,
+        warned_nan_scores_attr: str,
     ) -> None:
         if len(preds) == 0:
             return
 
         preds_np = torch.cat(preds).float().numpy()
         labels_np = torch.cat(labels).int().numpy()
+        n_total = labels_np.size
 
         # Low confidence in true activity = anomalous
         anomaly_scores = 1.0 - preds_np
@@ -258,30 +295,44 @@ class InsiderThreatLightning(pl.LightningModule):
             anomaly_scores, labels_np, target_fpr=self.target_fpr
         )
 
+        n_nonfinite = int(metrics["n_nonfinite"])
+        if n_nonfinite > 0 and not getattr(self, warned_nan_scores_attr):
+            logger.warning(
+                f"{prefix}: {n_nonfinite}/{n_total} anomaly scores were NaN/inf "
+                "and dropped before metric computation. The model produced NaN "
+                "logits during forward — likely root causes: (a) NaN/inf in "
+                "batch.x (preprocessing/scaling bug), (b) bf16 softmax on "
+                "extreme logits (model init or LR too aggressive), (c) GCN "
+                "normalisation on a graph with isolated nodes / no edges. "
+                "Per-epoch count is logged as `{prefix}/n_nonfinite` in W&B."
+            )
+            setattr(self, warned_nan_scores_attr, True)
+
         n_pos = int(metrics["n_pos"])
         n_neg = int(metrics["n_neg"])
-        if (n_pos == 0 or n_neg == 0) and not getattr(self, warned_attr):
+        if (n_pos == 0 or n_neg == 0) and not getattr(self, warned_single_class_attr):
             logger.warning(
                 f"{prefix} set has only one class (n_pos={n_pos}, n_neg={n_neg}); "
                 "ROC/PR-AUC will be NaN. Likely caused by current RandomSplit + skewed "
                 "user fractions in configs/config.yaml."
             )
-            setattr(self, warned_attr, True)
+            setattr(self, warned_single_class_attr, True)
 
         # Legacy names kept so EarlyStopping/ModelCheckpoint monitors keep working
         if not math.isnan(metrics["roc_auc"]):
-            self.log(f"{prefix}_auc", metrics["roc_auc"], on_epoch=True, prog_bar=True, batch_size=len(labels_np))
+            self.log(f"{prefix}_auc", metrics["roc_auc"], on_epoch=True, prog_bar=True, batch_size=n_total)
 
         # Namespaced metrics for the W&B dashboard
         for key, value in metrics.items():
-            self.log(f"{prefix}/{key}", value, on_epoch=True, batch_size=len(labels_np))
+            self.log(f"{prefix}/{key}", value, on_epoch=True, batch_size=n_total)
 
     def on_validation_epoch_end(self):
         self._log_eval_metrics(
             prefix="val",
             preds=self.val_preds,
             labels=self.val_labels,
-            warned_attr="_warned_single_class_val",
+            warned_single_class_attr="_warned_single_class_val",
+            warned_nan_scores_attr="_warned_nan_scores_val",
         )
         self.val_preds.clear()
         self.val_labels.clear()
@@ -302,7 +353,8 @@ class InsiderThreatLightning(pl.LightningModule):
             prefix="test",
             preds=self.test_preds,
             labels=self.test_labels,
-            warned_attr="_warned_single_class_test",
+            warned_single_class_attr="_warned_single_class_test",
+            warned_nan_scores_attr="_warned_nan_scores_test",
         )
         self.test_preds.clear()
         self.test_labels.clear()

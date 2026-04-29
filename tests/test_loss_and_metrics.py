@@ -170,6 +170,34 @@ def test_target_fpr_reported_in_metrics():
     assert metrics["target_fpr"] == pytest.approx(0.09)
 
 
+def test_nonfinite_scores_are_filtered_and_counted():
+    """NaN/inf in scores must not crash sklearn — they get dropped before
+    any metric is computed and the count is exposed as `n_nonfinite`."""
+    scores = np.array([0.1, np.nan, 0.8, np.inf, 0.4, -np.inf])
+    labels = np.array([0, 1, 1, 0, 0, 1])
+
+    metrics = _binary_metrics_from_anomaly_scores(scores, labels, target_fpr=0.5)
+
+    assert metrics["n_nonfinite"] == 3.0
+    # The 3 finite samples (0, 2, 4) had labels (0, 1, 0): so n_pos=1, n_neg=2.
+    assert metrics["n_pos"] == 1
+    assert metrics["n_neg"] == 2
+    assert math.isfinite(metrics["roc_auc"])
+
+
+def test_all_nonfinite_returns_nan_metrics_no_crash():
+    """If every score is non-finite, return NaN metrics instead of raising."""
+    scores = np.array([np.nan, np.nan, np.inf])
+    labels = np.array([0, 1, 1])
+
+    metrics = _binary_metrics_from_anomaly_scores(scores, labels)
+    assert metrics["n_nonfinite"] == 3.0
+    assert metrics["n_pos"] == 0
+    assert metrics["n_neg"] == 0
+    for k in ("roc_auc", "pr_auc", "tpr_at_fpr_target", "accuracy", "precision"):
+        assert math.isnan(metrics[k]), k
+
+
 def test_single_class_returns_nan_aucs():
     """No raise, just NaN for things that are undefined when only one class
     is present. Keeps the count metrics (TP/TN/FP/FN/etc.) intact."""
