@@ -188,9 +188,46 @@ class InsiderThreatLightning(pl.LightningModule):
         self._warned_single_class_test = False
         self._warned_nan_scores_val = False
         self._warned_nan_scores_test = False
+        self._warned_nonfinite_input_train = False
+        self._warned_nonfinite_input_val = False
+        self._warned_nonfinite_input_test = False
+        self._warned_nonfinite_logits_train = False
+        self._warned_nonfinite_logits_val = False
+        self._warned_nonfinite_logits_test = False
 
     def forward(self, batch_data):
         return self.model(batch_data)
+
+    def _sanitize_batch_x(self, batch, stage: str) -> int:
+        """Replace NaN/inf in input features with finite values."""
+        bad = ~torch.isfinite(batch.x)
+        n_bad = int(bad.sum().item())
+        if n_bad > 0:
+            warned_attr = f"_warned_nonfinite_input_{stage}"
+            if not getattr(self, warned_attr):
+                logger.warning(
+                    f"{stage}: found {n_bad} non-finite values in batch.x; "
+                    "replacing with finite values via torch.nan_to_num. "
+                    "This points to a preprocessing/scaling issue upstream."
+                )
+                setattr(self, warned_attr, True)
+            batch.x = torch.nan_to_num(batch.x, nan=0.0, posinf=1e4, neginf=-1e4)
+        return n_bad
+
+    def _sanitize_logits(self, logits: torch.Tensor, stage: str) -> tuple[torch.Tensor, int]:
+        """Replace NaN/inf logits so loss/metrics stay finite."""
+        bad = ~torch.isfinite(logits)
+        n_bad = int(bad.sum().item())
+        if n_bad > 0:
+            warned_attr = f"_warned_nonfinite_logits_{stage}"
+            if not getattr(self, warned_attr):
+                logger.warning(
+                    f"{stage}: found {n_bad} non-finite logits; replacing with "
+                    "finite values via torch.nan_to_num to avoid NaN loss/metrics."
+                )
+                setattr(self, warned_attr, True)
+            logits = torch.nan_to_num(logits, nan=0.0, posinf=1e4, neginf=-1e4)
+        return logits, n_bad
 
     def _anomaly_aware_loss(self, logits, y_act, y_label):
         """Soft-label cross-entropy from paper section IV-E (eq. 24-26).
@@ -243,7 +280,9 @@ class InsiderThreatLightning(pl.LightningModule):
         raise ValueError(f"Unknown loss_type: {self.loss_type}")
 
     def training_step(self, batch, batch_idx):
+        n_bad_x = self._sanitize_batch_x(batch, stage="train")
         logits = self.forward(batch)
+        logits, n_bad_logits = self._sanitize_logits(logits, stage="train")
         loss = self._compute_loss(logits, batch)
 
         batch_size = batch.y_act.shape[0]
@@ -258,13 +297,17 @@ class InsiderThreatLightning(pl.LightningModule):
             prog_bar=True,
             batch_size=batch_size,
         )
+        self.log("train/nonfinite_input_values", float(n_bad_x), on_step=True, on_epoch=True, batch_size=batch_size)
+        self.log("train/nonfinite_logits_values", float(n_bad_logits), on_step=True, on_epoch=True, batch_size=batch_size)
         return loss
 
     def validation_step(self, batch, batch_idx):
+        n_bad_x = self._sanitize_batch_x(batch, stage="val")
         logits = self.forward(batch)
+        logits, n_bad_logits = self._sanitize_logits(logits, stage="val")
         loss = self._compute_loss(logits, batch)
 
-        probs = F.softmax(logits, dim=1)
+        probs = F.softmax(logits.float(), dim=1)
         scores = probs.gather(1, batch.y_act.unsqueeze(1)).squeeze(1)
 
         self.val_preds.append(scores.detach().cpu())
@@ -272,6 +315,8 @@ class InsiderThreatLightning(pl.LightningModule):
 
         batch_size = batch.y_act.shape[0]
         self.log("val_loss", loss, on_epoch=True, on_step=False, prog_bar=True, batch_size=batch_size)
+        self.log("val/nonfinite_input_values", float(n_bad_x), on_epoch=True, on_step=False, batch_size=batch_size)
+        self.log("val/nonfinite_logits_values", float(n_bad_logits), on_epoch=True, on_step=False, batch_size=batch_size)
 
     def _log_eval_metrics(
         self,
@@ -342,11 +387,16 @@ class InsiderThreatLightning(pl.LightningModule):
             torch.mps.empty_cache()
 
     def test_step(self, batch, batch_idx):
+        n_bad_x = self._sanitize_batch_x(batch, stage="test")
         logits = self.forward(batch)
-        probs = F.softmax(logits, dim=1)
+        logits, n_bad_logits = self._sanitize_logits(logits, stage="test")
+        probs = F.softmax(logits.float(), dim=1)
         scores = probs.gather(1, batch.y_act.unsqueeze(1)).squeeze(1)
         self.test_preds.append(scores.detach().cpu())
         self.test_labels.append(batch.y_label.detach().cpu())
+        batch_size = batch.y_act.shape[0]
+        self.log("test/nonfinite_input_values", float(n_bad_x), on_epoch=True, on_step=False, batch_size=batch_size)
+        self.log("test/nonfinite_logits_values", float(n_bad_logits), on_epoch=True, on_step=False, batch_size=batch_size)
 
     def on_test_epoch_end(self):
         self._log_eval_metrics(

@@ -13,6 +13,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch_geometric.nn import GCNConv
+from torch_geometric.utils import to_dense_batch
 
 
 class GCN(nn.Module):
@@ -143,23 +144,13 @@ class GCNLSTMInsiderThreat(nn.Module):
         # GCN: produce node embeddings
         node_embeddings = self.gcn(batch_data)  # [total_nodes, gcn_hidden_dim]
 
-        # Unbatch: extract per-graph embeddings
-        batch_idx = batch_data.batch.max().item() + 1  # number of graphs in batch
-        graph_embeddings = []
-
-        for i in range(batch_idx):
-            mask = batch_data.batch == i
-            graph_embeddings.append(node_embeddings[mask])  # [num_nodes_in_graph, dim]
-
-        # Pad sequences to the same length
-        if max_seq_len is None:
-            max_seq_len = max(g.size(0) for g in graph_embeddings)
-
-        padded = torch.zeros(
-            batch_idx, max_seq_len, node_embeddings.size(1), device=node_embeddings.device
+        # Convert ragged node sequences per graph to dense tensor without
+        # Python-side loops (better throughput than masking graph-by-graph).
+        padded, _ = to_dense_batch(
+            node_embeddings,
+            batch_data.batch,
+            max_num_nodes=max_seq_len,
         )
-        for i, emb in enumerate(graph_embeddings):
-            padded[i, : emb.size(0), :] = emb
 
         # LSTM: process padded sequences
         logits = self.predictor(padded)  # [batch_size, num_activity_classes]
