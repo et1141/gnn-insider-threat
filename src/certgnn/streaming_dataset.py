@@ -37,14 +37,19 @@ def _release_heap_to_os() -> None:
     repeated torch.load/del cycles the process's physical footprint grows without
     bound even though Python no longer references the data. Calling
     `malloc_zone_pressure_relief(NULL, 0)` walks every zone and unmaps the empty
-    regions; on Linux this is a no-op (glibc already does it via M_TRIM).
+    regions.
+
+    On Linux glibc already trims via M_TRIM and the gc.collect() costs ~50ms of
+    GIL stall; we skip the whole thing because `_LIBC` is None and the malloc
+    leak doesn't exist.
     """
+    if _LIBC is None:
+        return
     gc.collect()
-    if _LIBC is not None:
-        try:
-            _LIBC.malloc_zone_pressure_relief(None, 0)
-        except (AttributeError, OSError):
-            pass
+    try:
+        _LIBC.malloc_zone_pressure_relief(None, 0)
+    except (AttributeError, OSError):
+        pass
 
 
 class StreamingChunkDataset(Dataset):
