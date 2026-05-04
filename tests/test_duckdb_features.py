@@ -2,7 +2,6 @@ import pandas as pd
 from datetime import datetime
 import duckdb
 
-# Importujemy starą implementację Pythona dla zapewnienia identyczności wyników z nową
 from certgnn.feature_extraction import GetFeature
 from certgnn.duckdb_features import (
     initialize_duckdb,
