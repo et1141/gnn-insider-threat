@@ -10,45 +10,98 @@ download:
     - "r5.2.tar.bz2"
     - "answers.tar.bz2"
 
-# NOTE: This is the post-merge intermediate config; reorganized to
-# variant-based structure in a later refactor commit.
+# ---------------------------------------------------------------------------
+# Preprocessing — pick a variant; settings live under their own subsection.
+# Both variants share the DuckDB SQL feature pipeline and produce the same
+# 54-dim node features. They differ in user selection and how train/val/test
+# is materialised on disk.
+# ---------------------------------------------------------------------------
 preprocessing:
-  # Paper-faithful variant (per-graph random split)
-  frac_normal_users: 0.0085       # Fraction of normal users to include (0.0-1.0)
-  frac_malicious_users: 0.09      # Fraction of malicious users (99 total in r5.2)
-  keep_local: true                # Keep local .pt after push to GDrive
+  variant: "paper_faithful"           # paper_faithful | user_level_split
 
-  # User-level-split variant (scenario-balanced, anti-leakage)
-  num_normal_users: 100
-  num_malicious_users: 90         # max 99 for r5.2
-  balance_malicious_by_scenario: true
-  strict_equal_scenarios: true
+  paper_faithful:
+    frac_normal_users: 0.0085         # Fraction of normal users (0.0-1.0)
+    frac_malicious_users: 0.09        # Fraction of malicious users (99 total in r5.2)
+    keep_local: true                  # Keep .pt files locally after `--stream` push
 
-  # Shared
-  dataset_version: "5.2"
-  min_session_size: 5
-  max_session_size: 50
+  user_level_split:
+    num_normal_users: 100
+    num_malicious_users: 90           # max 99 for r5.2
+    balance_malicious_by_scenario: true
+    strict_equal_scenarios: true
+    val_ratio: 0.15
+    test_ratio: 0.15
+
+  common:
+    dataset_version: "5.2"
+    min_session_size: 5
+    max_session_size: 50
+    seed: 42
+
+# ---------------------------------------------------------------------------
+# Training — pick task + model + their args. The Lightning module monitors
+# val/loss (min) for anomaly_aware and val/roc_auc (max) for binary; the
+# callback factory picks the right mode for ModelCheckpoint/EarlyStopping.
+# ---------------------------------------------------------------------------
+training:
+  task: "anomaly_aware"               # anomaly_aware | binary
+  model: "gcn_lstm"                   # gcn_lstm | graph_pool_mlp
   seed: 42
-  split_val_ratio: 0.15
-  split_test_ratio: 0.15
 
-baseline:
-  seed: 42
-  batch_size: 64
-  max_epochs: 10
-  learning_rate: 0.001
-  weight_decay: 0.0001
-  hidden_dim: 128
-  dropout: 0.2
-  pooling: "mean_max"
-  patience: 5
-  max_local_chunks: 2
-  num_workers: 0
-  accelerator: "auto"
-  devices: "auto"
-  log_every_n_steps: 50
-  wandb_project: "gnn-insider-threat-baseline"
-  wandb_mode: "offline"
-  run_name: "graph-pooling-mlp"
-  prefetch_chunks: false
-  delete_after_eviction: true
+  # Forwarded as **model_args to MODEL_REGISTRY[model](**kwargs).
+  # input_dim/num_node_features/num_activity_classes are auto-filled from
+  # metadata.pkl when omitted.
+  model_args:
+    gcn_hidden_dim: 16
+    lstm_hidden_dim: 32
+    lstm_num_layers: 2
+
+  # Forwarded as **kwargs to the Lightning task constructor (task-specific).
+  # anomaly_aware: { loss_type: "anomaly_aware" | "standard", target_fpr: 0.05 }
+  # binary:        { gamma: 2.0, pos_weight_clamp: 1000.0 }
+  loss_args:
+    loss_type: "anomaly_aware"
+    target_fpr: 0.05
+
+  optimizer:
+    name: "adam"                      # adam | adamw
+    lr: 1.0e-3
+    weight_decay: 1.0e-5
+
+  scheduler:
+    type: "plateau"                   # null to disable, or "plateau"
+    factor: 0.5
+    patience: 3
+    min_lr: 1.0e-6
+
+  data:
+    batch_size: 128
+    num_workers: 0
+    max_local_chunks: null            # null = autodetect from RAM/accelerator
+    persistent_workers: null
+    prefetch_factor: null
+    pin_memory: null
+    accelerator: null                 # null = autodetect; otherwise gpu/mps/cpu
+
+    # paper-faithful only: per-graph random split applied at training time
+    val_size: 0.1
+    test_size: 0.2
+    sampler_seed: 42
+
+  trainer:
+    max_epochs: 30
+    log_every_n_steps: 50
+    accelerator: "auto"
+    devices: "auto"
+    precision: 32                     # 32 | "16-mixed" | "bf16-mixed"
+    deterministic: true
+
+  callbacks:
+    patience: 5
+    save_top_k: 3
+    enable_gpu_metrics: true
+
+  wandb:
+    project: "gnn-insider-threat"
+    mode: "offline"                   # offline | online | disabled
+    run_name: null                    # null lets wandb auto-name the run

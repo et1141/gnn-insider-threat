@@ -312,17 +312,22 @@ def main() -> None:
     config = load_config()
     root = get_project_root()
     prep = config.get("preprocessing", {})
+    variant_cfg = prep.get("user_level_split", {}) or {}
+    common_cfg = prep.get("common", {}) or {}
 
-    num_normal_users = prep.get("num_normal_users", 100)
-    num_malicious_users = prep.get("num_malicious_users", 90)
-    balance_malicious = prep.get("balance_malicious_by_scenario", False)
-    strict_equal_scenarios = prep.get("strict_equal_scenarios", True)
-    split_val_ratio = float(prep.get("split_val_ratio", 0.15))
-    split_test_ratio = float(prep.get("split_test_ratio", 0.15))
-    dataset_version = prep.get("dataset_version", "5.2")
-    min_session = prep.get("min_session_size", 5)
-    max_session = prep.get("max_session_size", 50)
-    seed = prep.get("seed", 42)
+    # Backward-compat: accept both nested (preferred) and flat keys.
+    num_normal_users = variant_cfg.get("num_normal_users", prep.get("num_normal_users", 100))
+    num_malicious_users = variant_cfg.get("num_malicious_users", prep.get("num_malicious_users", 90))
+    balance_malicious = variant_cfg.get("balance_malicious_by_scenario",
+                                        prep.get("balance_malicious_by_scenario", False))
+    strict_equal_scenarios = variant_cfg.get("strict_equal_scenarios",
+                                             prep.get("strict_equal_scenarios", True))
+    split_val_ratio = float(variant_cfg.get("val_ratio", prep.get("split_val_ratio", 0.15)))
+    split_test_ratio = float(variant_cfg.get("test_ratio", prep.get("split_test_ratio", 0.15)))
+    dataset_version = common_cfg.get("dataset_version", prep.get("dataset_version", "5.2"))
+    min_session = common_cfg.get("min_session_size", prep.get("min_session_size", 5))
+    max_session = common_cfg.get("max_session_size", prep.get("max_session_size", 50))
+    seed = common_cfg.get("seed", prep.get("seed", 42))
 
     extract_dir = root / config["paths"]["extract_dir"]
     processed_dir = root / config["paths"]["processed_dir"]

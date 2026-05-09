@@ -167,14 +167,17 @@ def main() -> None:
     config = load_config()
     root = get_project_root()
     prep = config.get("preprocessing", {})
+    variant_cfg = prep.get("paper_faithful", {}) or {}
+    common_cfg = prep.get("common", {}) or {}
 
-    frac_normal_users = prep.get("frac_normal_users", 1.0)
-    frac_malicious_users = prep.get("frac_malicious_users", 1.0)
-    dataset_version = prep.get("dataset_version", "5.2")
-    min_session = prep.get("min_session_size", 5)
-    max_session = prep.get("max_session_size", 50)
-    seed = prep.get("seed", 42)
-    keep_local = args.keep_local or prep.get("keep_local", False)
+    # Backward-compat: accept both nested (preferred) and flat keys.
+    frac_normal_users = variant_cfg.get("frac_normal_users", prep.get("frac_normal_users", 1.0))
+    frac_malicious_users = variant_cfg.get("frac_malicious_users", prep.get("frac_malicious_users", 1.0))
+    dataset_version = common_cfg.get("dataset_version", prep.get("dataset_version", "5.2"))
+    min_session = common_cfg.get("min_session_size", prep.get("min_session_size", 5))
+    max_session = common_cfg.get("max_session_size", prep.get("max_session_size", 50))
+    seed = common_cfg.get("seed", prep.get("seed", 42))
+    keep_local = args.keep_local or variant_cfg.get("keep_local", prep.get("keep_local", False))
 
     extract_dir = root / config["paths"]["extract_dir"]
     processed_dir = root / config["paths"]["processed_dir"]
