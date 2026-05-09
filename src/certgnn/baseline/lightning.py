@@ -9,7 +9,7 @@ import torch.nn.functional as F
 from pytorch_lightning import LightningModule
 from sklearn.metrics import confusion_matrix, precision_score, recall_score, roc_auc_score, average_precision_score
 
-from certgnn.baseline.model import GraphPoolingMLP
+from certgnn.models.graph_pool_mlp import GraphPoolingMLP
 
 
 def _extract_labels(batch: Any) -> torch.Tensor:

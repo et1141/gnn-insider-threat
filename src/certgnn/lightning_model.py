@@ -20,7 +20,7 @@ from sklearn.metrics import (
 )
 import pytorch_lightning as pl
 
-from certgnn.model import GCNLSTMInsiderThreat
+from certgnn.models.gcn_lstm import GCNLSTMInsiderThreat
 
 
 def _binary_metrics_from_anomaly_scores(
