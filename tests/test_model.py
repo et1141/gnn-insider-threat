@@ -3,12 +3,11 @@ from __future__ import annotations
 import torch
 from torch_geometric.data import Batch, Data
 
-from certgnn.baseline.lightning import (
-    GraphBaselineLightningModule,
-    compute_binary_metrics,
-)
+from certgnn.lightning import BinaryClassifierLightning, build_lightning_module
+from certgnn.lightning.metrics import binary_metrics_from_scores
+from certgnn.models import MODEL_REGISTRY, build_model
 from certgnn.models.graph_pool_mlp import GraphPoolingMLP
-from certgnn.baseline.split import build_user_splits
+from certgnn.preprocessing.user_level_split import build_user_splits
 
 
 def _toy_batch() -> Batch:
@@ -25,6 +24,28 @@ def _toy_batch() -> Batch:
     return Batch.from_data_list([graph_1, graph_2])
 
 
+# ---------------------------------------------------------------------------
+# Model registry
+# ---------------------------------------------------------------------------
+def test_model_registry_lists_both_architectures():
+    assert "gcn_lstm" in MODEL_REGISTRY
+    assert "graph_pool_mlp" in MODEL_REGISTRY
+
+
+def test_build_model_returns_correct_class():
+    m1 = build_model("graph_pool_mlp", input_dim=2, hidden_dim=8)
+    assert isinstance(m1, GraphPoolingMLP)
+
+
+def test_build_model_unknown_name_raises():
+    import pytest
+    with pytest.raises(KeyError):
+        build_model("does_not_exist")
+
+
+# ---------------------------------------------------------------------------
+# Architectures
+# ---------------------------------------------------------------------------
 def test_user_split_is_deterministic():
     user_ids = [f"user_{idx}" for idx in range(10)]
     user_labels = {user_id: int(idx >= 7) for idx, user_id in enumerate(user_ids)}
@@ -46,11 +67,14 @@ def test_graph_pooling_forward_pass():
     assert torch.isfinite(logits).all()
 
 
-def test_compute_binary_metrics():
-    y_true = torch.tensor([0, 0, 1, 1])
-    y_prob = torch.tensor([0.1, 0.7, 0.8, 0.9])
+def test_binary_metrics_helper():
+    """Sanity-check that the unified metric helper produces sensible values
+    for the same toy case the previous baseline test used."""
+    import numpy as np
+    y_true = np.array([0, 0, 1, 1])
+    y_prob = np.array([0.1, 0.7, 0.8, 0.9])
 
-    metrics = compute_binary_metrics(y_true, y_prob)
+    metrics = binary_metrics_from_scores(y_prob, y_true, target_fpr=None)
 
     assert metrics["precision"] == 2 / 3
     assert metrics["recall"] == 1.0
@@ -58,18 +82,28 @@ def test_compute_binary_metrics():
     assert 0.0 <= metrics["roc_auc"] <= 1.0
 
 
-def test_lightning_training_step_runs():
+# ---------------------------------------------------------------------------
+# Lightning task wiring
+# ---------------------------------------------------------------------------
+def test_binary_classifier_training_step_runs():
     batch = _toy_batch()
-    module = GraphBaselineLightningModule(
-        input_dim=2,
-        hidden_dim=8,
-        dropout=0.0,
-        pooling="mean",
+    module = BinaryClassifierLightning(
+        model_name="graph_pool_mlp",
+        model_args={"input_dim": 2, "hidden_dim": 8, "dropout": 0.0, "pooling": "mean"},
         learning_rate=1e-3,
         weight_decay=0.0,
+        scheduler=None,
     )
-
     loss = module.training_step(batch, 0)
-
     assert loss.ndim == 0
     assert torch.isfinite(loss)
+
+
+def test_build_lightning_module_dispatches_correctly():
+    module = build_lightning_module(
+        task="binary",
+        model_name="graph_pool_mlp",
+        model_args={"input_dim": 2, "hidden_dim": 4},
+        scheduler=None,
+    )
+    assert isinstance(module, BinaryClassifierLightning)
