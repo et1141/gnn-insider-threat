@@ -89,8 +89,19 @@ def _build_module(config: dict, feature_dim: int, num_classes: int):
     train_cfg = config.get("training", {})
     task = train_cfg.get("task", "binary")
     model_name = train_cfg.get("model", "graph_pool_mlp")
-    model_args = dict(train_cfg.get("model_args") or {})
-    loss_args = dict(train_cfg.get("loss_args") or {})
+
+    # model_args is keyed per model; loss_args per task. train.py picks the
+    # matching subsection so swapping model/task via CLI doesn't pull in
+    # kwargs meant for the old choice. Falls back to flat dict for backward
+    # compat with older config files.
+    def _per_key(cfg_block: dict, key: str) -> dict:
+        block = cfg_block or {}
+        if isinstance(block, dict) and key in block and isinstance(block[key], dict):
+            return dict(block[key])
+        return dict(block)
+
+    model_args = _per_key(train_cfg.get("model_args"), model_name)
+    loss_args = _per_key(train_cfg.get("loss_args"), task)
 
     # Sensible defaults per architecture if the user didn't pin them.
     if model_name == "graph_pool_mlp":

@@ -48,20 +48,29 @@ training:
   model: "gcn_lstm"                   # gcn_lstm | graph_pool_mlp
   seed: 42
 
-  # Forwarded as **model_args to MODEL_REGISTRY[model](**kwargs).
-  # input_dim/num_node_features/num_activity_classes are auto-filled from
-  # metadata.pkl when omitted.
+  # Per-model kwargs forwarded to MODEL_REGISTRY[model](**kwargs); train.py
+  # picks model_args[model]. input_dim / num_node_features /
+  # num_activity_classes are auto-filled from metadata.pkl when omitted.
   model_args:
-    gcn_hidden_dim: 16
-    lstm_hidden_dim: 32
-    lstm_num_layers: 2
+    gcn_lstm:
+      gcn_hidden_dim: 16
+      lstm_hidden_dim: 32
+      lstm_num_layers: 2
+    graph_pool_mlp:
+      hidden_dim: 128
+      dropout: 0.2
+      pooling: "mean_max"
 
-  # Forwarded as **kwargs to the Lightning task constructor (task-specific).
-  # anomaly_aware: { loss_type: "anomaly_aware" | "standard", target_fpr: 0.05 }
-  # binary:        { gamma: 2.0, pos_weight_clamp: 1000.0 }
+  # Per-task kwargs forwarded to the Lightning task constructor; train.py
+  # picks loss_args[task] so changing `task:` doesn't require also editing
+  # the args here.
   loss_args:
-    loss_type: "anomaly_aware"
-    target_fpr: 0.05
+    anomaly_aware:
+      loss_type: "anomaly_aware"        # anomaly_aware | standard
+      target_fpr: 0.05
+    binary:
+      gamma: 2.0
+      pos_weight_clamp: 1000.0
 
   optimizer:
     name: "adam"                      # adam | adamw
