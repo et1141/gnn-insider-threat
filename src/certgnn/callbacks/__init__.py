@@ -1,4 +1,4 @@
-"""Lightning callbacks + a fabryka that builds the standard set from config."""
+"""Lightning callbacks + a factory that builds the standard set from config."""
 
 from __future__ import annotations
 

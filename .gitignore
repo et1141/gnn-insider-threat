@@ -4,6 +4,7 @@ data/**
 !data/processed/**/*.dvc
 
 notes/
+notes.md
 context/
 .venv/
 __pycache__/

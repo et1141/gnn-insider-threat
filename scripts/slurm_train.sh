@@ -11,14 +11,11 @@
 #SBATCH --error="/Ziob/awalczak/gnn-insider-threat/logs/train-%j.txt"
 
 # RTX 3090 (24 GB VRAM) + 32 GB system RAM + 8 CPUs.
-# - batch_size 1024: model is 53 K params, GPU memory is barely touched at any size
-# - num_workers 4: each worker holds its own LRU chunk cache; with auto-detection
-#                  we get ~6 chunks per worker (4 x 6 x 1.14 GB ~= 27 GB, fits in 32 GB)
-# - prefetch_factor 4: every worker keeps 4 batches in-flight to hide chunk-swap stalls
-# - persistent_workers auto-resolves to True on CUDA (skip phase-respawn cost)
-# - precision auto-resolves to bf16-mixed on Ampere (RTX 3090 supports it natively)
-# - target_fpr 0.05 matches paper section V-C r5.2 operating point;
-#   override to 0.09 if you switch to r6.2.
+# Hardware-specific knobs (batch_size, num_workers, prefetch_factor,
+# persistent_workers, precision) are now expressed in configs/config.yaml
+# under training.data and training.trainer. This script only overrides
+# the few flags worth keeping per-job (max_epochs, model/task selection)
+# via train's CLI flags; everything else flows through config.
 
 set -euo pipefail
 
@@ -52,20 +49,13 @@ nvidia-smi || echo "WARNING: nvidia-smi failed"
 echo "=========================================="
 
 # --- Training ---
-# --no-sync: assume `.venv` was prepared by `uv sync` BEFORE sbatch. Two parallel
-# jobs would otherwise race on the venv lock. Run `uv sync` manually after each
-# pyproject.toml change.
-uv run --no-sync python src/certgnn/train.py \
-    --processed-dir data/processed/r5.2 \
-    --batch-size 1024 \
-    --max-epochs 50 \
-    --num-workers 4 \
-    --prefetch-factor 4 \
-    --persistent-workers auto \
-    --log-every-n-steps 50 \
-    --target-fpr 0.05 \
-    --val-size 0.1 \
-    --test-size 0.2
+# --no-sync: assume `.venv` was prepared by `uv sync` BEFORE sbatch. Two
+# parallel jobs would otherwise race on the venv lock. Run `uv sync` manually
+# after each pyproject.toml change.
+#
+# Forward any extra args to `uv run train`, e.g.:
+#   sbatch scripts/slurm_train.sh --task binary --model graph_pool_mlp
+uv run --no-sync train "$@"
 
 echo "=========================================="
 echo "End: $(date)"

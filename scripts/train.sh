@@ -15,7 +15,7 @@
 # Both Malloc* vars must be set BEFORE the Python interpreter starts; setting
 # them inside Python is too late.
 #
-# Usage: ./scripts/train.sh [args forwarded to src/certgnn/train.py]
+# Usage: ./scripts/train.sh [args forwarded to `uv run train`]
 
 set -euo pipefail
 
@@ -25,4 +25,4 @@ export MallocNanoZone=0
 export PYTHONMALLOC=malloc
 export PYTORCH_MPS_HIGH_WATERMARK_RATIO=0.0
 
-exec uv run python src/certgnn/train.py "$@"
+exec uv run train "$@"
