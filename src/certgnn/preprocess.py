@@ -87,54 +87,24 @@ def collect_malicious_ids(answers_dir: Path, dataset_version: str) -> set:
 # Step 3: User selection
 # ---------------------------------------------------------------------------
 
-# def select_users(
-#     extract_dir: Path,
-#     answers_dir: Path,
-#     dataset_version: str,
-#     data_fraction: float,
-#     seed: int = 42,
-# ) -> set | None:
-#     """Select a subset of users. Malicious users are always included."""
-#     if data_fraction >= 1.0:
-#         return None
-
-#     rng = np.random.RandomState(seed)
-#     all_users = set(
-#         pd.read_csv(extract_dir / "logon.csv", usecols=["user"])["user"].unique(),
-#     )
-#     insiders = pd.read_csv(answers_dir / "insiders.csv")
-#     mal_users = set(
-#         insiders[
-#             insiders["dataset"].astype(str).str.startswith(dataset_version)
-#         ]["user"].unique(),
-#     )
-#     non_mal = sorted(all_users - mal_users)
-#     n = max(1, int(len(non_mal) * data_fraction))
-#     sampled = set(rng.choice(non_mal, size=n, replace=False))
-#     selected = sampled | mal_users
-#     print(f"  {len(selected)} users: {len(mal_users)} malicious + {len(sampled)} non-malicious")
-#     return selected
-
 def select_users(
     extract_dir: Path,
     answers_dir: Path,
     dataset_version: str,
-    normal_user_fraction: float,
-    malicious_user_fraction: float = 1.0,
+    num_normal_users: int,
+    num_malicious_users: int,
     balance_malicious_by_scenario: bool = False,
     strict_equal_scenarios: bool = True,
     seed: int = 42,
 ) -> set | None:
     """
-    Select users with separate fractions for normal and malicious users.
+    Select a specific number of normal and malicious users.
 
     If balance_malicious_by_scenario=True, malicious users are sampled equally
-    from each scenario (for CERT 5.2 typically scenarios 1..4).
+    from each scenario based on the total num_malicious_users requested.
     """
-    if not (0.0 <= normal_user_fraction <= 1.0):
-        raise ValueError("normal_user_fraction must be in [0.0, 1.0]")
-    if not (0.0 <= malicious_user_fraction <= 1.0):
-        raise ValueError("malicious_user_fraction must be in [0.0, 1.0]")
+    if num_normal_users < 0 or num_malicious_users < 0:
+        raise ValueError("Number of users to select cannot be negative.")
 
     rng = np.random.RandomState(seed)
 
@@ -157,14 +127,12 @@ def select_users(
     # ---------------------------
     # Sample normal users
     # ---------------------------
-    if normal_user_fraction == 0.0:
+    # Ensure we don't try to sample more users than available
+    n_non = min(num_normal_users, len(non_mal))
+    
+    if n_non == 0:
         sampled_non_mal = set()
-    elif normal_user_fraction >= 1.0:
-        sampled_non_mal = set(non_mal)
     else:
-        n_non = int(len(non_mal) * normal_user_fraction)
-        if n_non == 0 and len(non_mal) > 0:
-            n_non = 1
         sampled_non_mal = set(rng.choice(non_mal, size=n_non, replace=False))
 
     # ---------------------------
@@ -172,22 +140,16 @@ def select_users(
     # ---------------------------
     sampled_mal = set()
 
-    if malicious_user_fraction == 0.0 or len(mal_users_all) == 0:
+    if num_malicious_users == 0 or len(mal_users_all) == 0:
         sampled_mal = set()
-
-    elif malicious_user_fraction >= 1.0 and not balance_malicious_by_scenario:
-        sampled_mal = set(mal_users_all)
 
     elif not balance_malicious_by_scenario:
         mal_list = sorted(mal_users_all)
-        n_mal = int(len(mal_list) * malicious_user_fraction)
-        if n_mal == 0 and len(mal_list) > 0:
-            n_mal = 1
+        n_mal = min(num_malicious_users, len(mal_list))
         sampled_mal = set(rng.choice(mal_list, size=n_mal, replace=False))
 
     else:
         # Equal-per-scenario malicious sampling
-        # No "remainder" distribution -> keeps exact equality across scenarios.
         scenario_users = {}
         for scenario, g in insiders.groupby(insiders["scenario"].astype(str)):
             users = sorted(set(g["user"]))
@@ -198,20 +160,16 @@ def select_users(
             sampled_mal = set()
         else:
             n_scen = len(scenario_users)
-            target_total_mal = int(len(mal_users_all) * malicious_user_fraction)
-            if target_total_mal == 0 and malicious_user_fraction > 0:
-                target_total_mal = 1
+            
+            # Calculate how many malicious users to take per scenario
+            per_scen = num_malicious_users // n_scen
 
-            per_scen = target_total_mal // n_scen
-
-            if per_scen == 0 and target_total_mal > 0:
+            if per_scen == 0 and num_malicious_users > 0:
                 if strict_equal_scenarios:
                     raise ValueError(
-                        "malicious_user_fraction too small for equal-per-scenario sampling. "
-                        "Increase malicious_user_fraction."
+                        "num_malicious_users too small for equal-per-scenario sampling. "
+                        f"You need at least {n_scen} malicious users to cover all scenarios."
                     )
-                # fallback: take 1 from as many scenarios as possible
-                per_scen = 1
 
             sampled = set()
             for scenario, users in sorted(scenario_users.items(), key=lambda x: x[0]):
@@ -229,7 +187,7 @@ def select_users(
 
     selected = sampled_non_mal | sampled_mal
 
-    # Keep old behavior optimization: no filtering when all users selected
+    # Optimization: no filtering when effectively all users are selected
     if len(selected) == len(all_users):
         print(
             "  User selection disabled effectively: all users selected "
@@ -651,16 +609,10 @@ def main():
     config = load_config()
     root = get_project_root()
 
-    # prep = config.get("preprocessing", {})
-    # data_fraction = prep.get("data_fraction", 1.0)
-    # dataset_version = prep.get("dataset_version", "5.2")
-    # min_session = prep.get("min_session_size", 5)
-    # max_session = prep.get("max_session_size", 50)
-    # seed = prep.get("seed", 42)
-
     prep = config.get("preprocessing", {})
-    normal_fraction = prep.get("normal_user_fraction", prep.get("data_fraction", 1.0))
-    malicious_fraction = prep.get("malicious_user_fraction", 1.0)
+    num_normal_users = prep.get("num_normal_users", 100)
+    num_malicious_users = prep.get("num_malicious_users", 90)
+    
     balance_malicious = prep.get("balance_malicious_by_scenario", False)
     strict_equal_scenarios = prep.get("strict_equal_scenarios", True)
     split_val_ratio = prep.get("split_val_ratio", 0.15)
@@ -694,26 +646,47 @@ def main():
     # )
     print(
         "[3/8] Selecting users "
-        f"(normal_fraction={normal_fraction}, "
-        f"malicious_fraction={malicious_fraction}, "
+        f"(num_normal_users={num_normal_users}, "
+        f"num_malicious_users={num_malicious_users}, "
         f"balance_malicious_by_scenario={balance_malicious})..."
     )
     selected = select_users(
         extract_dir=extract_dir,
         answers_dir=answers_dir,
         dataset_version=dataset_version,
-        normal_user_fraction=normal_fraction,
-        malicious_user_fraction=malicious_fraction,
+        num_normal_users=num_normal_users,
+        num_malicious_users=num_malicious_users,
         balance_malicious_by_scenario=balance_malicious,
         strict_equal_scenarios=strict_equal_scenarios,
         seed=seed,
     )
 
     selected_users = sorted(selected) if selected is not None else sorted(user_df["user_id"].astype(str).unique())
-    malicious_users = set(
-        pd.read_csv(answers_dir / "insiders.csv")["user"].astype(str).unique()
-    )
-    user_labels = {user_id: int(user_id in malicious_users) for user_id in selected_users}
+    
+    # ---------------------------------------------------------
+    # NEW: Multi-class user labels mapping (Scenario-aware)
+    # ---------------------------------------------------------
+    insiders_df = pd.read_csv(answers_dir / "insiders.csv")
+    # Make sure we only check insiders for the correct dataset version
+    insiders_df = insiders_df[
+        insiders_df["dataset"].astype(str).str.startswith(str(dataset_version))
+    ]
+    
+    # Build a dictionary: user_id -> scenario_id (e.g., 1, 2, 3, 4)
+    user_to_scenario = {}
+    for _, row in insiders_df.iterrows():
+        u_id = str(row["user"])
+        scenario_id = int(row["scenario"])
+        if u_id not in user_to_scenario:
+            user_to_scenario[u_id] = scenario_id
+            
+    # Assign scenario_id to insiders, and 0 to normal users
+    user_labels = {
+        user_id: user_to_scenario.get(str(user_id), 0) 
+        for user_id in selected_users
+    }
+    # ---------------------------------------------------------
+
     user_split_map = build_user_splits(
         user_ids=selected_users,
         user_labels=user_labels,

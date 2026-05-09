@@ -10,16 +10,9 @@ download:
     - "r5.2.tar.bz2"
     - "answers.tar.bz2"
 
-# preprocessing:
-#   data_fraction: 0.01   # Fraction of users to include (0.0-1.0). Malicious users always included.
-#   dataset_version: "5.2"
-#   min_session_size: 5    # Minimum activities per session/sub-session
-#   max_session_size: 50   # Maximum activities per sub-session before splitting
-#   seed: 42
-
 preprocessing:
-  normal_user_fraction: 0.01
-  malicious_user_fraction: 0.20
+  num_normal_users: 100
+  num_malicious_users: 90   # max 99 for 5.2 dataset
   balance_malicious_by_scenario: true
   strict_equal_scenarios: true
   dataset_version: "5.2"

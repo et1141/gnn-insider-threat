@@ -5,36 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from typing import Iterable
-
-from sklearn.model_selection import train_test_split
-
-
-def _safe_split(
-    items: list[str],
-    labels: list[int],
-    test_size: float,
-    seed: int,
-) -> tuple[list[str], list[str]]:
-    if len(items) <= 1 or test_size <= 0:
-        return items, []
-
-    stratify = labels if len(set(labels)) > 1 else None
-    try:
-        train_items, heldout_items = train_test_split(
-            items,
-            test_size=test_size,
-            random_state=seed,
-            stratify=stratify,
-        )
-    except ValueError:
-        train_items, heldout_items = train_test_split(
-            items,
-            test_size=test_size,
-            random_state=seed,
-            stratify=None,
-        )
-
-    return list(train_items), list(heldout_items)
+import numpy as np
 
 
 def build_user_splits(
@@ -44,8 +15,13 @@ def build_user_splits(
     test_ratio: float = 0.15,
     seed: int = 42,
 ) -> dict[str, list[str]]:
-    """Split users into train/val/test with light stratification."""
-
+    """
+    Split users into train/val/test with strict scenario-level stratification.
+    
+    Groups users by their specific label (0 for normal, 1, 2, 3... for specific
+    malicious scenarios). Then, it calculates exact capacities for each split
+    within that group to ensure every scenario is represented as equally as possible.
+    """
     if not 0.0 <= val_ratio < 1.0:
         raise ValueError("val_ratio must be in [0.0, 1.0)")
     if not 0.0 <= test_ratio < 1.0:
@@ -53,31 +29,72 @@ def build_user_splits(
     if val_ratio + test_ratio >= 1.0:
         raise ValueError("val_ratio + test_ratio must be < 1.0")
 
+    rng = np.random.RandomState(seed)
     users = sorted(dict.fromkeys(user_ids))
-    labels = [int(user_labels.get(user, 0)) for user in users]
+    
+    # Group users by their label/scenario
+    label_to_users = {}
+    for user in users:
+        lbl = int(user_labels.get(user, 0))
+        if lbl not in label_to_users:
+            label_to_users[lbl] = []
+        label_to_users[lbl].append(user)
 
-    train_users, test_users = _safe_split(users, labels, test_ratio, seed)
-    remaining_labels = [int(user_labels.get(user, 0)) for user in train_users]
-    adjusted_val_ratio = val_ratio / max(1.0 - test_ratio, 1e-8)
-    train_users, val_users = _safe_split(
-        train_users,
-        remaining_labels,
-        adjusted_val_ratio,
-        seed + 1,
-    )
+    splits = {"train": [], "val": [], "test": []}
 
-    splits = {
-        "train": sorted(train_users),
-        "val": sorted(val_users),
-        "test": sorted(test_users),
-    }
+    # Distribute users for each scenario group separately
+    for lbl, group in label_to_users.items():
+        group_copy = list(group)
+        # Shuffle to ensure random assignment before splitting
+        rng.shuffle(group_copy)
+        
+        n = len(group_copy)
+        
+        # Calculate standard capacities based on ratios
+        n_val = int(round(n * val_ratio))
+        n_test = int(round(n * test_ratio))
+        n_train = n - n_val - n_test
+        
+        # -------------------------------------------------------------
+        # SAFEGUARD 1: Train set MUST have at least 1 user (if possible)
+        # Without training data for a scenario, testing on it is useless.
+        # -------------------------------------------------------------
+        if n_train <= 0 and n > 0:
+            n_train = 1
+            # Steal a sample back from val or test to give to train
+            if n_val >= n_test and n_val > 0:
+                n_val -= 1
+            elif n_test > 0:
+                n_test -= 1
 
+        # -------------------------------------------------------------
+        # SAFEGUARD 2: Force val/test representation for Malicious users
+        # (Only if we have enough users to safely populate train as well)
+        # -------------------------------------------------------------
+        if lbl != 0 and n >= 3:
+            if n_val == 0 and val_ratio > 0:
+                n_val = 1
+                n_train -= 1
+            if n_test == 0 and test_ratio > 0:
+                n_test = 1
+                n_train -= 1
+
+        # Assign sliced groups to respective splits EXACTLY using n_train
+        # Train gets the first chunk, then Val gets the next, Test gets the rest
+        splits["train"].extend(group_copy[:n_train])
+        splits["val"].extend(group_copy[n_train : n_train + n_val])
+        splits["test"].extend(group_copy[n_train + n_val :])
+
+    # Sort the final lists for deterministic output
+    splits["train"] = sorted(splits["train"])
+    splits["val"] = sorted(splits["val"])
+    splits["test"] = sorted(splits["test"])
+
+    # Fallback if train is completely empty
     if not splits["train"] and users:
         splits["train"] = [users[0]]
-        if users[0] in splits["val"]:
-            splits["val"].remove(users[0])
-        if users[0] in splits["test"]:
-            splits["test"].remove(users[0])
+        if users[0] in splits["val"]: splits["val"].remove(users[0])
+        if users[0] in splits["test"]: splits["test"].remove(users[0])
 
     return splits
 
