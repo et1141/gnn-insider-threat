@@ -37,7 +37,7 @@ preprocess = "certgnn.preprocessing:main"
 preprocess-paper-faithful = "certgnn.preprocessing.paper_faithful:main"
 preprocess-user-split = "certgnn.preprocessing.user_level_split:main"
 download-data = "certgnn.download_data:download_dataset"
-# train = "certgnn.train:main"  # rewired in Phase 7
+train = "certgnn.train:main"
 
 [[tool.uv.index]]
 name = "pytorch"
