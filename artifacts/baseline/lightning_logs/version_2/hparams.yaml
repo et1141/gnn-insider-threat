@@ -1,0 +1,6 @@
+input_dim: 54
+hidden_dim: 128
+dropout: 0.2
+pooling: mean_max
+learning_rate: 0.001
+weight_decay: 0.0001

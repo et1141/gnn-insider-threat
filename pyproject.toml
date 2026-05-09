@@ -9,6 +9,7 @@ dependencies = [
     "numpy",
     "torch",
     "torch_geometric",
+    "torchvision>=0.26.0",
     "pytorch-lightning",
     "scikit-learn",
     "tqdm",
@@ -20,6 +21,7 @@ dependencies = [
     "loguru",
     "psutil",
     "duckdb>=1.5.2",
+    "wandb>=0.25.1",
     "pytest>=9.0.2",
     "pytest-mock>=3.15.1",
 ]
@@ -29,13 +31,17 @@ dev = [
     "pytest",
     "ruff",
 ]
-experiment = [
-    "wandb",
-]
 
 [project.scripts]
 preprocess = "certgnn.preprocess:main"
 download-data = "certgnn.download_data:download_dataset"
+train-baseline = "certgnn.baseline.train:main"
+test-baseline = "certgnn.baseline.test_baseline:main"
+
+[[tool.uv.index]]
+name = "pytorch"
+url = "https://download.pytorch.org/whl/cu126"
+explicit = true
 
 [build-system]
 requires = ["hatchling"]

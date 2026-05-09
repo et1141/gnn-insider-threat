@@ -10,11 +10,45 @@ download:
     - "r5.2.tar.bz2"
     - "answers.tar.bz2"
 
+# NOTE: This is the post-merge intermediate config; reorganized to
+# variant-based structure in a later refactor commit.
 preprocessing:
-  frac_normal_users: 0.0085       # Fraction of normal users to include (0.0-1.0), 
-  frac_malicious_users: 0.09      # Fraction of malicious users to sample (0.0-1.0), 99 total
+  # Paper-faithful variant (per-graph random split)
+  frac_normal_users: 0.0085       # Fraction of normal users to include (0.0-1.0)
+  frac_malicious_users: 0.09      # Fraction of malicious users (99 total in r5.2)
+  keep_local: true                # Keep local .pt after push to GDrive
+
+  # User-level-split variant (scenario-balanced, anti-leakage)
+  num_normal_users: 100
+  num_malicious_users: 90         # max 99 for r5.2
+  balance_malicious_by_scenario: true
+  strict_equal_scenarios: true
+
+  # Shared
   dataset_version: "5.2"
-  min_session_size: 5             # Minimum activities per session/sub-session
-  max_session_size: 50            # Maximum activities per sub-session before splitting
-  keep_local: true               # Keep local .pt files after push to GDrive
+  min_session_size: 5
+  max_session_size: 50
   seed: 42
+  split_val_ratio: 0.15
+  split_test_ratio: 0.15
+
+baseline:
+  seed: 42
+  batch_size: 64
+  max_epochs: 10
+  learning_rate: 0.001
+  weight_decay: 0.0001
+  hidden_dim: 128
+  dropout: 0.2
+  pooling: "mean_max"
+  patience: 5
+  max_local_chunks: 2
+  num_workers: 0
+  accelerator: "auto"
+  devices: "auto"
+  log_every_n_steps: 50
+  wandb_project: "gnn-insider-threat-baseline"
+  wandb_mode: "offline"
+  run_name: "graph-pooling-mlp"
+  prefetch_chunks: false
+  delete_after_eviction: true

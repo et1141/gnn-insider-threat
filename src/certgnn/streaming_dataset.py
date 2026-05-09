@@ -1,29 +1,33 @@
-"""Streaming PyTorch Dataset for chunked graph data stored on DVC remote.
+"""Streaming PyTorch Datasets for chunked graph data stored on DVC remote.
 
-Keeps at most `max_local_chunks` chunk files on disk at once. When a new chunk
-is needed and the cache is full, the oldest chunk is evicted (and deleted from
-disk). The next chunk is then pulled from GDrive on demand.
+Two flavours coexist for now (TODO: consider unifying once usage settles):
 
-Usage with PyTorch Lightning:
-    dataset = StreamingChunkDataset(processed_dir, max_local_chunks=2)
-    loader = DataLoader(dataset, batch_size=64, num_workers=4)
+1. ``StreamingChunkDataset`` — random-access ``Dataset`` with a two-level cache
+   (in-memory LRU + on-disk persistence). Suited for the paper-faithful path
+   where ``ChunkAwareSampler`` keeps the active chunks hot across batches.
 
-Multi-worker DataLoaders are supported: __getstate__/__setstate__ drop the
-threading.Lock before pickling and recreate it in each worker, so every
-worker process ends up with its own independent LRU cache. Note the memory
-implication — each worker duplicates up to `max_local_chunks` chunks in RAM.
+2. ``SequentialChunkDataset`` — ``IterableDataset`` that pulls one chunk,
+   yields its graphs, then deletes the local file before moving on. Suited
+   for pre-split chunk pipelines where each split is a contiguous stream.
+
+Multi-worker DataLoaders are supported by ``StreamingChunkDataset``:
+``__getstate__``/``__setstate__`` drop the ``threading.Lock`` before pickling
+and recreate it in each worker, so every worker process ends up with its own
+independent LRU cache. Each worker duplicates up to ``max_local_chunks``
+chunks in RAM.
 """
 
 import ctypes
 import ctypes.util
 import gc
+import random
 import sys
 import threading
 from collections import OrderedDict
 from pathlib import Path
 
 import torch
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, IterableDataset
 
 from certgnn.chunk_store import DvcChunkStore
 
@@ -36,11 +40,11 @@ def _release_heap_to_os() -> None:
     macOS's malloc keeps freed pages in per-zone caches indefinitely, so after
     repeated torch.load/del cycles the process's physical footprint grows without
     bound even though Python no longer references the data. Calling
-    `malloc_zone_pressure_relief(NULL, 0)` walks every zone and unmaps the empty
+    ``malloc_zone_pressure_relief(NULL, 0)`` walks every zone and unmaps the empty
     regions.
 
     On Linux glibc already trims via M_TRIM and the gc.collect() costs ~50ms of
-    GIL stall; we skip the whole thing because `_LIBC` is None and the malloc
+    GIL stall; we skip the whole thing because ``_LIBC`` is None and the malloc
     leak doesn't exist.
     """
     if _LIBC is None:
@@ -61,6 +65,8 @@ class StreamingChunkDataset(Dataset):
 
     Args:
         processed_dir: Directory containing chunk files and their .dvc pointers.
+        chunk_names: Optional explicit list of chunk filenames to use. When None,
+            all chunks from the manifest are used (paper-faithful flow).
         max_local_chunks: How many chunk files to keep loaded in memory simultaneously.
         delete_after_eviction: If True, delete chunk files from disk when evicted
             from memory (frees disk space but requires re-pulling from remote).
@@ -70,6 +76,7 @@ class StreamingChunkDataset(Dataset):
     def __init__(
         self,
         processed_dir: Path,
+        chunk_names: list[str] | None = None,
         max_local_chunks: int = 2,
         delete_after_eviction: bool = False,
     ):
@@ -78,7 +85,7 @@ class StreamingChunkDataset(Dataset):
         self.max_local_chunks = max_local_chunks
         self.delete_after_eviction = delete_after_eviction
 
-        self.chunk_names = self.store.list_chunks()
+        self.chunk_names = chunk_names if chunk_names is not None else self.store.list_chunks()
         if not self.chunk_names:
             raise ValueError(
                 "Manifest is empty — no chunks found. "
@@ -135,3 +142,49 @@ class StreamingChunkDataset(Dataset):
             graphs = torch.load(chunk_path, weights_only=False)
             self._loaded[chunk_name] = graphs
             return graphs
+
+
+class SequentialChunkDataset(IterableDataset):
+    """Dataset that streams graph chunks sequentially from DVC.
+
+    Pulls one chunk, yields all its graphs, then deletes the local copy before
+    moving on. Prevents disk thrashing and RAM overflow when the dataset is
+    consumed in a single pass per epoch (e.g. pre-split chunks where the
+    sampler does not need cross-chunk locality).
+    """
+
+    def __init__(
+        self,
+        processed_dir: Path,
+        chunk_names: list[str],
+        is_training: bool = True,
+    ):
+        self.processed_dir = Path(processed_dir)
+        self.store = DvcChunkStore(self.processed_dir)
+        self.chunk_names = chunk_names
+        self.is_training = is_training
+        self._total_graphs = sum(self.store.chunk_size(name) for name in self.chunk_names)
+
+    def __len__(self) -> int:
+        return self._total_graphs
+
+    def __iter__(self):
+        chunks_to_process = list(self.chunk_names)
+        if self.is_training:
+            random.shuffle(chunks_to_process)
+
+        for chunk_name in chunks_to_process:
+            chunk_path = self.store.pull_chunk(chunk_name)
+            graphs = torch.load(chunk_path, weights_only=False)
+
+            if self.is_training:
+                random.shuffle(graphs)
+
+            for graph in graphs:
+                yield graph
+
+            del graphs
+            try:
+                chunk_path.unlink()
+            except (PermissionError, FileNotFoundError):
+                pass
