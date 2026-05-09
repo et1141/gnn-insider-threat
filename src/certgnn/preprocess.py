@@ -481,7 +481,7 @@ def create_all_graphs(
         keep_local: If True (with --stream), keeps local .pt files after push.
                     If False, deletes them after push to save disk space.
     """
-    from certgnn.chunk_store import (
+    from certgnn.data.chunk_store import (
         DvcChunkStore,
     )  # lazy import — not needed without --stream
 

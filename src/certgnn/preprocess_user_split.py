@@ -459,7 +459,7 @@ def create_all_graphs(
                 deleted locally immediately after saving. Requires DVC remote
                 to be configured and authenticated.
     """
-    from certgnn.chunk_store import DvcChunkStore  # lazy import — not needed without --stream
+    from certgnn.data.chunk_store import DvcChunkStore  # lazy import — not needed without --stream
 
     graph_buffers: dict[str, list] = {"train": [], "val": [], "test": []}
     chunk_idx = {"train": 0, "val": 0, "test": 0}

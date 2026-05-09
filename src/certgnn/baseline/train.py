@@ -11,7 +11,7 @@ from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
 from torch_geometric.loader import DataLoader
 
 from certgnn.baseline.data import list_split_chunks, load_processed_metadata
-from certgnn.streaming_dataset import SequentialChunkDataset
+from certgnn.data.streaming_dataset import SequentialChunkDataset
 from certgnn.baseline.lightning import GraphBaselineLightningModule
 from certgnn.utils import get_project_root, load_config
 

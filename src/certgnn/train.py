@@ -117,7 +117,7 @@ class GPUMetricsCallback(pl.Callback):
         metrics.update(_proc_memory_metrics())
         trainer.logger.log_metrics(metrics, step=trainer.global_step)
 
-from certgnn.datamodule import InsiderThreatDataModule
+from certgnn.data.datamodule import InsiderThreatDataModule
 from certgnn.lightning_model import InsiderThreatLightning
 from certgnn.split import RandomSplit
 from certgnn.utils import get_project_root

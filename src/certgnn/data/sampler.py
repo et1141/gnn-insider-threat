@@ -27,7 +27,7 @@ from typing import Iterator
 
 from torch.utils.data import Sampler, Subset
 
-from certgnn.streaming_dataset import StreamingChunkDataset
+from certgnn.data.streaming_dataset import StreamingChunkDataset
 
 
 class ChunkAwareSampler(Sampler[int]):

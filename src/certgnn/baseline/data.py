@@ -5,7 +5,7 @@ from __future__ import annotations
 import pickle
 from pathlib import Path
 
-from certgnn.chunk_store import DvcChunkStore
+from certgnn.data.chunk_store import DvcChunkStore
 
 
 def load_processed_metadata(processed_dir: Path) -> dict:

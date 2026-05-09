@@ -1,43 +1,40 @@
 """PyTorch Lightning DataModule for insider threat detection.
 
-Wraps the streaming chunk-based dataset with a pluggable split strategy,
-making it easy to swap between different train/val/test divisions.
+Supports two chunk layouts via the ``mode`` argument:
 
-Usage:
-    from certgnn.split import RandomSplit
-    from certgnn.datamodule import InsiderThreatDataModule
+* ``"random_split"`` (paper-faithful, mine): one undifferentiated set of
+  ``graph_chunk_*.pt`` chunks; train/val/test slices are produced at runtime
+  by a ``SplitStrategy`` (e.g. ``RandomSplit``) over the flat dataset and
+  served by ``StreamingChunkDataset`` + ``ChunkAwareSampler``.
 
-    split = RandomSplit(val_size=0.1, test_size=0.2, seed=42)
-    dm = InsiderThreatDataModule(
-        processed_dir="data/processed/r5.2",
-        split_strategy=split,
-        batch_size=32,
-    )
-
-    # In PyTorch Lightning Trainer:
-    trainer = pl.Trainer(...)
-    trainer.fit(model, datamodule=dm)
+* ``"presplit"`` (user-level-split, kolegi): chunks already named with
+  ``train_/val_/test_`` prefixes; each split streams independently via
+  ``SequentialChunkDataset`` (no sampler — chunks are consumed in order).
 """
 
 from pathlib import Path
 
-import torch
 import pytorch_lightning as pl
+import torch
 from loguru import logger
 from torch.utils.data import Subset
 from torch_geometric.loader import DataLoader
 
-from certgnn.sampler import ChunkAwareSampler
+from certgnn.data.chunk_store import DvcChunkStore
+from certgnn.data.sampler import ChunkAwareSampler
+from certgnn.data.streaming_dataset import (
+    SequentialChunkDataset,
+    StreamingChunkDataset,
+)
 from certgnn.split import SplitStrategy
-from certgnn.streaming_dataset import StreamingChunkDataset
 
 
 def _job_memory_limit_bytes() -> int:
     """Return the effective memory ceiling for this process.
 
     On SLURM, psutil reports the whole machine's RAM — not the job's cgroup
-    limit. Workers get OOM-killed when they collectively exceed that limit even
-    though psutil showed plenty of space.  Priority order:
+    limit. Workers get OOM-killed when they collectively exceed that limit
+    even though psutil showed plenty of space.  Priority order:
 
     1. SLURM_MEM_PER_NODE env var (set by SLURM for every job).
     2. cgroup v2  /sys/fs/cgroup/memory.max
@@ -81,15 +78,15 @@ def _estimate_max_chunks(
     """Pick a chunk-cache size that fits in the job's actual memory budget.
 
     The LRU cache is per-worker (each DataLoader worker owns its own copy
-    after the dataset is pickled to spawn), so total RAM consumed is
-    roughly `num_workers * max_local_chunks * chunk_in_memory_size`. A 380 MB
-    chunk file unpickles to ~1 GB of Python heap (Data dict + tensor metadata),
-    so we use a 3x file-size multiplier.
+    after the dataset is pickled to spawn), so total RAM consumed is roughly
+    ``num_workers * max_local_chunks * chunk_in_memory_size``. A 380 MB chunk
+    file unpickles to ~1 GB of Python heap (Data dict + tensor metadata), so
+    we use a 3x file-size multiplier.
 
-    On CUDA, GPU memory is separate from system RAM, so we reserve only 2 GB
-    for the model/scratch/OS and let the cache go bigger (cap 16 chunks).
-    On MPS, the Metal pool shares system RAM with the chunks; reserve 5 GB
-    and cap 6 chunks to avoid swap thrash on a 16 GB MacBook.
+    On CUDA, GPU memory is separate from system RAM — reserve only 2 GB for
+    the model/scratch/OS and let the cache go bigger (cap 16 chunks). On MPS,
+    the Metal pool shares system RAM with the chunks; reserve 5 GB and cap
+    6 chunks to avoid swap thrash on a 16 GB MacBook.
     """
     mem_limit = _job_memory_limit_bytes()
     chunk_files = sorted(processed_dir.glob("graph_chunk_*.pt"))
@@ -128,13 +125,36 @@ def _detect_accelerator() -> str:
     return "cpu"
 
 
+def _list_split_chunks(processed_dir: Path, split: str) -> list[str]:
+    """Return chunk filenames for a given split (train/val/test).
+
+    Looks for the new ``{split}_graph_chunk_*.pt`` naming first, then falls
+    back to the legacy ``graph_chunk_*.pt`` naming for backward compatibility.
+    """
+    store = DvcChunkStore(Path(processed_dir))
+    prefix = f"{split}_graph_chunk_"
+    split_chunks = [name for name in store.list_chunks() if name.startswith(prefix)]
+    if split_chunks:
+        return sorted(split_chunks, key=_chunk_sort_key)
+    legacy_chunks = [name for name in store.list_chunks() if name.startswith("graph_chunk_")]
+    if legacy_chunks:
+        return sorted(legacy_chunks, key=_chunk_sort_key)
+    raise FileNotFoundError(
+        f"No chunk files found for split '{split}' in {processed_dir}. "
+        "Run preprocessing first."
+    )
+
+
+def _chunk_sort_key(name: str) -> int:
+    import re
+    match = re.search(r"\d+", name)
+    return int(match.group()) if match else 0
+
+
 class InsiderThreatDataModule(pl.LightningDataModule):
-    """DataModule for streaming insider threat detection graphs.
+    """Unified DataModule for both preprocessing variants.
 
-    Lazily loads chunks from disk/remote via StreamingChunkDataset, applies a
-    pluggable split strategy, and provides DataLoaders for training.
-
-    `persistent_workers` defaults are device-aware:
+    ``persistent_workers`` defaults are device-aware:
     - CUDA: True (workers stay alive across phases — keeps the LRU cache
       warm and avoids spawn overhead, which dominates throughput when each
       epoch is short relative to chunk-load time).
@@ -146,7 +166,8 @@ class InsiderThreatDataModule(pl.LightningDataModule):
     def __init__(
         self,
         processed_dir: str | Path,
-        split_strategy: SplitStrategy,
+        mode: str = "random_split",
+        split_strategy: SplitStrategy | None = None,
         batch_size: int = 32,
         num_workers: int = 0,
         max_local_chunks: int | None = None,
@@ -156,29 +177,16 @@ class InsiderThreatDataModule(pl.LightningDataModule):
         accelerator: str | None = None,
         sampler_seed: int = 42,
     ):
-        """Initialize the DataModule.
-
-        Args:
-            processed_dir: Path to directory with chunks and manifest.
-            split_strategy: SplitStrategy instance (e.g., RandomSplit).
-            batch_size: Batch size for DataLoaders.
-            num_workers: Number of worker processes. With num_workers>0 each
-                process gets its own LRU cache copy — safe when chunks are
-                local. Recommended: 4-6 on CUDA, 0-1 on macOS, 0 on shared
-                low-RAM servers.
-            max_local_chunks: How many chunk files to keep cached in memory
-                simultaneously per worker. If None (default), auto-detects
-                based on available RAM, accelerator, and num_workers.
-            pin_memory: Pin CPU tensors for faster GPU transfer. Defaults to
-                True when CUDA is available.
-            persistent_workers: Keep workers alive between phases. Defaults
-                to True on CUDA (with num_workers>0), False on MPS.
-            prefetch_factor: Number of batches each worker prefetches.
-                Defaults to 4 on CUDA, 2 elsewhere.
-            accelerator: 'gpu' | 'mps' | 'cpu'. Auto-detected if None.
-        """
         super().__init__()
+        if mode not in {"random_split", "presplit"}:
+            raise ValueError(
+                f"mode must be 'random_split' or 'presplit', got {mode!r}"
+            )
+        if mode == "random_split" and split_strategy is None:
+            raise ValueError("split_strategy is required when mode='random_split'")
+
         self.processed_dir = Path(processed_dir)
+        self.mode = mode
         self.split_strategy = split_strategy
         self.batch_size = batch_size
         self.num_workers = num_workers
@@ -200,9 +208,7 @@ class InsiderThreatDataModule(pl.LightningDataModule):
         else:
             self.prefetch_factor = prefetch_factor
 
-        if max_local_chunks is None:
-            from certgnn.chunk_store import DvcChunkStore
-
+        if max_local_chunks is None and mode == "random_split":
             store = DvcChunkStore(self.processed_dir)
             num_chunks = len(store.list_chunks())
             self.max_local_chunks = _estimate_max_chunks(
@@ -212,38 +218,50 @@ class InsiderThreatDataModule(pl.LightningDataModule):
                 accelerator=self.accelerator,
             )
         else:
-            self.max_local_chunks = max_local_chunks
+            self.max_local_chunks = max_local_chunks or 2
 
-        self.dataset: StreamingChunkDataset | None = None
-        self.train_data: Subset | None = None
-        self.val_data: Subset | None = None
-        self.test_data: Subset | None = None
+        self.train_data: Subset | SequentialChunkDataset | None = None
+        self.val_data: Subset | SequentialChunkDataset | None = None
+        self.test_data: Subset | SequentialChunkDataset | None = None
+        self._dataset: StreamingChunkDataset | None = None
 
     def setup(self, stage: str | None = None) -> None:
-        """Load dataset and apply split strategy.
+        if self.mode == "random_split":
+            self._setup_random_split()
+        else:
+            self._setup_presplit()
 
-        Called by PyTorch Lightning. Creates Subset wrappers for each fold.
-        """
-        self.dataset = StreamingChunkDataset(
+    def _setup_random_split(self) -> None:
+        self._dataset = StreamingChunkDataset(
             self.processed_dir, max_local_chunks=self.max_local_chunks
         )
-        n = len(self.dataset)
-
+        n = len(self._dataset)
         splits = self.split_strategy.split(n)
-
-        self.train_data = Subset(self.dataset, splits["train"])
-        self.val_data = Subset(self.dataset, splits["val"])
-        self.test_data = Subset(self.dataset, splits["test"])
-
+        self.train_data = Subset(self._dataset, splits["train"])
+        self.val_data = Subset(self._dataset, splits["val"])
+        self.test_data = Subset(self._dataset, splits["test"])
         logger.info(
-            f"Dataset ready | chunks_in_cache={self.max_local_chunks} | "
+            f"DataModule[random_split] | chunks_in_cache={self.max_local_chunks} | "
             f"persistent_workers={self.persistent_workers} | "
-            f"prefetch_factor={self.prefetch_factor} | "
             f"total={n:,} | train={len(self.train_data):,} | "
             f"val={len(self.val_data):,} | test={len(self.test_data):,}"
         )
 
-    def _make_loader(self, subset: Subset, shuffle: bool, seed_offset: int) -> DataLoader:
+    def _setup_presplit(self) -> None:
+        train_chunks = _list_split_chunks(self.processed_dir, "train")
+        val_chunks = _list_split_chunks(self.processed_dir, "val")
+        test_chunks = _list_split_chunks(self.processed_dir, "test")
+        self.train_data = SequentialChunkDataset(self.processed_dir, train_chunks, is_training=True)
+        self.val_data = SequentialChunkDataset(self.processed_dir, val_chunks, is_training=False)
+        self.test_data = SequentialChunkDataset(self.processed_dir, test_chunks, is_training=False)
+        logger.info(
+            f"DataModule[presplit] | "
+            f"train={len(self.train_data):,} ({len(train_chunks)} chunks) | "
+            f"val={len(self.val_data):,} ({len(val_chunks)} chunks) | "
+            f"test={len(self.test_data):,} ({len(test_chunks)} chunks)"
+        )
+
+    def _make_random_split_loader(self, subset: Subset, shuffle: bool, seed_offset: int) -> DataLoader:
         sampler = ChunkAwareSampler(
             subset,
             active_chunks=self.max_local_chunks,
@@ -257,22 +275,37 @@ class InsiderThreatDataModule(pl.LightningDataModule):
             "pin_memory": self.pin_memory,
             "persistent_workers": self.persistent_workers,
         }
-        # prefetch_factor is only valid when num_workers > 0
         if self.num_workers > 0:
             kwargs["prefetch_factor"] = self.prefetch_factor
         return DataLoader(subset, **kwargs)
 
+    def _make_presplit_loader(self, dataset: SequentialChunkDataset) -> DataLoader:
+        # IterableDataset: no sampler, no shuffle flag — shuffle is internal
+        # to the dataset (controlled by is_training).
+        kwargs: dict = {
+            "batch_size": self.batch_size,
+            "num_workers": self.num_workers,
+            "pin_memory": self.pin_memory,
+        }
+        if self.num_workers > 0:
+            kwargs["prefetch_factor"] = self.prefetch_factor
+            kwargs["persistent_workers"] = self.persistent_workers
+        return DataLoader(dataset, **kwargs)
+
     def train_dataloader(self) -> DataLoader:
-        """Return training DataLoader with chunk-aware shuffling."""
         assert self.train_data is not None, "Call setup() first"
-        return self._make_loader(self.train_data, shuffle=True, seed_offset=0)
+        if self.mode == "random_split":
+            return self._make_random_split_loader(self.train_data, shuffle=True, seed_offset=0)
+        return self._make_presplit_loader(self.train_data)
 
     def val_dataloader(self) -> DataLoader:
-        """Return validation DataLoader (deterministic chunk-sequential order)."""
         assert self.val_data is not None, "Call setup() first"
-        return self._make_loader(self.val_data, shuffle=False, seed_offset=1)
+        if self.mode == "random_split":
+            return self._make_random_split_loader(self.val_data, shuffle=False, seed_offset=1)
+        return self._make_presplit_loader(self.val_data)
 
     def test_dataloader(self) -> DataLoader:
-        """Return test DataLoader (deterministic chunk-sequential order)."""
         assert self.test_data is not None, "Call setup() first"
-        return self._make_loader(self.test_data, shuffle=False, seed_offset=2)
+        if self.mode == "random_split":
+            return self._make_random_split_loader(self.test_data, shuffle=False, seed_offset=2)
+        return self._make_presplit_loader(self.test_data)

@@ -29,7 +29,7 @@ from pathlib import Path
 import torch
 from torch.utils.data import Dataset, IterableDataset
 
-from certgnn.chunk_store import DvcChunkStore
+from certgnn.data.chunk_store import DvcChunkStore
 
 _LIBC = ctypes.CDLL(ctypes.util.find_library("c")) if sys.platform == "darwin" else None
 

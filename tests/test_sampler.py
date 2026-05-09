@@ -5,8 +5,8 @@ from collections import Counter
 import pytest
 from torch.utils.data import Subset
 
-from certgnn.sampler import ChunkAwareSampler
-from certgnn.streaming_dataset import StreamingChunkDataset
+from certgnn.data.sampler import ChunkAwareSampler
+from certgnn.data.streaming_dataset import StreamingChunkDataset
 
 
 def _fake_dataset(num_chunks: int, per_chunk: int) -> StreamingChunkDataset:
