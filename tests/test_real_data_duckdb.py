@@ -3,7 +3,7 @@ import duckdb
 import numpy as np
 from certgnn.utils import get_project_root
 from certgnn.feature_extraction import GetFeature
-from certgnn.duckdb_features import (
+from certgnn.preprocessing.features_duckdb import (
     initialize_duckdb,
     LOGON_SQL,
     DEVICE_SQL,
@@ -11,7 +11,7 @@ from certgnn.duckdb_features import (
     EMAIL_SQL,
     HTTP_SQL,
 )
-from certgnn.preprocess import build_user_pc_mapping
+from certgnn.preprocessing.common import build_user_pc_mapping
 
 
 def test_real_data_equivalence():

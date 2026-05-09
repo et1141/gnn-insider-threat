@@ -33,7 +33,9 @@ dev = [
 ]
 
 [project.scripts]
-preprocess = "certgnn.preprocess:main"
+preprocess = "certgnn.preprocessing:main"
+preprocess-paper-faithful = "certgnn.preprocessing.paper_faithful:main"
+preprocess-user-split = "certgnn.preprocessing.user_level_split:main"
 download-data = "certgnn.download_data:download_dataset"
 train-baseline = "certgnn.baseline.train:main"
 test-baseline = "certgnn.baseline.test_baseline:main"

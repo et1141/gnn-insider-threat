@@ -4,7 +4,7 @@ import duckdb
 
 # Importujemy starą implementację Pythona dla zapewnienia identyczności wyników z nową
 from certgnn.feature_extraction import GetFeature
-from certgnn.duckdb_features import (
+from certgnn.preprocessing.features_duckdb import (
     initialize_duckdb,
     extract_logon_features,
     extract_device_features,
