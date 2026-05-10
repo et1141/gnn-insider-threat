@@ -1,8 +1,11 @@
-# Insider Threat Detection with GCN and Bi-LSTM
+# Insider Threat Detection with GCN + Bi-LSTM
 
-A PyTorch project for detecting insider threats in the CMU CERT r5.2 dataset.
-Two preprocessing variants and two model architectures coexist behind a
-unified config + Lightning structure.
+Deep learning project for insider thread detection based on GCN + Bi-LSTM with explicit and implicit graphs proposed by  [arXiv:2512.18483](https://(arxiv.org/abs/2512.18483v1).
+
+## Overview
+- MU CERT r5.2 dataset.
+- resolving potential data leakage from the original paper 
+- unified config + Lightning structure.
 
 ## Setup
 
