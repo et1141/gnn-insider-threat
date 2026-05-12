@@ -33,3 +33,6 @@ wandb/
 artifacts/
 logs/
 reports/
+
+.vscode/
+.idea/
