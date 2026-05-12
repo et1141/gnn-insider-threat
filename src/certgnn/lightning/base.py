@@ -150,7 +150,7 @@ class BaseLightningModule(pl.LightningModule):
         if not buf:
             return
         scores = torch.cat([s for s, _ in buf], dim=0)
-        labels = torch.cat([l for _, l in buf], dim=0)
+        labels = torch.cat([lbl for _, lbl in buf], dim=0)
         buf.clear()
         metrics = self.epoch_metrics(scores, labels)
         if metrics:

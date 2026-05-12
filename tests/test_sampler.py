@@ -16,7 +16,7 @@ def _fake_dataset(num_chunks: int, per_chunk: int) -> StreamingChunkDataset:
     which is enough — the sampler never calls __getitem__.
     """
     ds = StreamingChunkDataset.__new__(StreamingChunkDataset)
-    ds._index = [(c, l) for c in range(num_chunks) for l in range(per_chunk)]
+    ds._index = [(c, idx) for c in range(num_chunks) for idx in range(per_chunk)]
     ds.chunk_names = [f"graph_chunk_{i}.pt" for i in range(num_chunks)]
     return ds
 
