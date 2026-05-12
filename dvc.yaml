@@ -1,0 +1,77 @@
+stages:
+  download:
+    cmd: uv run download-data
+    deps:
+      - src/certgnn/download_data.py
+    params:
+      - configs/config.yaml:
+          - download
+          - paths.raw_dir
+    outs:
+      - data/raw:
+          cache: true
+          push: true
+
+  # Paper-faithful preprocessing: fractional user selection, single-buffer
+  # chunks named graph_chunk_*.pt. Train/val/test slicing happens at training
+  # time via per-graph RandomSplit.
+  preprocess_paper_faithful:
+    cmd: uv run preprocess-paper-faithful --stream
+    deps:
+      - src/certgnn/preprocessing/__init__.py
+      - src/certgnn/preprocessing/common.py
+      - src/certgnn/preprocessing/paper_faithful.py
+      - src/certgnn/preprocessing/features_duckdb.py
+      - src/certgnn/data/chunk_store.py
+      - data/raw
+    params:
+      - configs/config.yaml:
+          - preprocessing.variant
+          - preprocessing.paper_faithful
+          - preprocessing.common
+          - paths
+    # processed chunks streamed to GDrive via DvcChunkStore — no local outs
+
+  # User-level scenario-stratified preprocessing: fixed-count selection,
+  # train/val/test materialised on disk as {split}_graph_chunk_*.pt with
+  # an audit trail at user_split_manifest.json.
+  preprocess_user_split:
+    cmd: uv run preprocess-user-split --stream
+    deps:
+      - src/certgnn/preprocessing/__init__.py
+      - src/certgnn/preprocessing/common.py
+      - src/certgnn/preprocessing/user_level_split.py
+      - src/certgnn/preprocessing/features_duckdb.py
+      - src/certgnn/data/chunk_store.py
+      - data/raw
+    params:
+      - configs/config.yaml:
+          - preprocessing.variant
+          - preprocessing.user_level_split
+          - preprocessing.common
+          - paths
+
+  # Training: dispatched by training.task and training.model. Reads chunks
+  # produced by whichever preprocessing variant is named in
+  # preprocessing.variant — the DataModule picks random_split or presplit
+  # mode automatically.
+  train:
+    cmd: uv run train
+    deps:
+      - src/certgnn/train.py
+      - src/certgnn/data
+      - src/certgnn/lightning
+      - src/certgnn/models
+      - src/certgnn/callbacks
+      - src/certgnn/losses.py
+      - src/certgnn/split.py
+      - src/certgnn/utils.py
+      - configs/chunks_manifest.json
+      - data/processed/r5.2
+    params:
+      - configs/config.yaml:
+          - training
+          - preprocessing.variant
+          - paths.processed_dir
+    outs:
+      - reports/training/metrics.json

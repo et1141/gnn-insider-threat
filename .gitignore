@@ -1,9 +1,38 @@
-data/
+data/**
+!data/processed/
+!data/processed/**/
+!data/processed/**/*.dvc
+
 notes/
+notes.md
+context/
 .venv/
 __pycache__/
 .pytest_cache/
 .ruff_cache/
 *.pyc
 .DS_Store
+
+# DVC - local config and cache
+.dvc/config.local
+.dvc/tmp/
+.dvc/cache/
+
+client_secret*.json
+gdrive_client_secret*
+credentials.json
+token.json
+
+# PyTorch Lightning checkpoints and logs - tracked with DVC
+checkpoints/
+!checkpoints/.gitignore
+lightning_logs/
+
+# Training artifacts
+wandb/
+artifacts/
+logs/
+reports/
+
 .vscode/
+.idea/
