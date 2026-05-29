@@ -126,16 +126,18 @@ def _build_module(config: dict, feature_dim: int, num_classes: int):
     )
 
 
-def _build_logger(config: dict) -> Any:
+def _build_logger(config: dict, save_dir: Path) -> Any:
     wandb_cfg = config.get("training", {}).get("wandb") or {}
     if not wandb_cfg or wandb_cfg.get("disabled"):
         return None
     try:
         from pytorch_lightning.loggers import WandbLogger
+        save_dir.mkdir(parents=True, exist_ok=True)
         return WandbLogger(
             project=wandb_cfg.get("project", "gnn-insider-threat"),
             mode=wandb_cfg.get("mode", "offline"),
             name=wandb_cfg.get("run_name"),
+            save_dir=str(save_dir),
             log_model=False,
         )
     except Exception as exc:
@@ -188,6 +190,7 @@ def main() -> None:
 
     root = get_project_root()
     processed_dir = root / config["paths"]["processed_dir"]
+    output_dir = root / str(_get(config, "training", "output_dir", default="outputs"))
 
     seed = int(_get(config, "training", "seed", default=42))
     pl.seed_everything(seed, workers=True)
@@ -209,7 +212,7 @@ def main() -> None:
         enable_gpu_metrics=bool(callback_cfg.get("enable_gpu_metrics", True)),
     )
 
-    logger = _build_logger(config)
+    logger = _build_logger(config, output_dir)
 
     trainer = pl.Trainer(
         max_epochs=int(trainer_cfg.get("max_epochs", 10)),
@@ -221,7 +224,7 @@ def main() -> None:
         callbacks=callbacks,
         logger=logger,
         fast_dev_run=args.fast_dev_run,
-        default_root_dir=str(root / "artifacts"),
+        default_root_dir=str(output_dir),
     )
 
     trainer.fit(module, datamodule=datamodule)

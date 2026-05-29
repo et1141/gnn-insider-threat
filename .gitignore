@@ -1,38 +1,54 @@
+# ---------------------------------------------------------------------------
+# Data — keep only the DVC pointers under data/processed/, never the blobs.
+# Raw data and the multi-GB processed .pt chunks are versioned with DVC and
+# streamed from the remote (see README), so they must not enter git.
+# ---------------------------------------------------------------------------
 data/**
 !data/processed/
 !data/processed/**/
 !data/processed/**/*.dvc
 
+# Local scratch / reference material (not part of the deliverable)
 notes/
 notes.md
 context/
+
+# Python / tooling caches
 .venv/
+.venv-*/
 __pycache__/
 .pytest_cache/
 .ruff_cache/
 *.pyc
 .DS_Store
 
-# DVC - local config and cache
+# DVC — local-only config and cache (the tracked .dvc/config is shared)
 .dvc/config.local
 .dvc/tmp/
 .dvc/cache/
 
+# Secrets / credentials (Google Drive service account, OAuth tokens, ...)
 client_secret*.json
 gdrive_client_secret*
 credentials.json
 token.json
+*.sa.json
 
-# PyTorch Lightning checkpoints and logs - tracked with DVC
-checkpoints/
-!checkpoints/.gitignore
-lightning_logs/
-
-# Training artifacts
+# ---------------------------------------------------------------------------
+# Run artifacts — every training run writes here. All regenerated, never
+# committed. `outputs/` is the single root for checkpoints + W&B + logs
+# (configured via training.output_dir); the rest are legacy/tool defaults.
+# ---------------------------------------------------------------------------
+outputs/
 wandb/
 artifacts/
+lightning_logs/
+checkpoints/
 logs/
 reports/
 
 .vscode/
 .idea/
+
+# W&B falls back to a <project-name>/ dir if save_dir is misconfigured.
+gnn-insider-threat/
