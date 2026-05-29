@@ -19,16 +19,11 @@ import torch
 from tqdm import tqdm
 
 from certgnn.preprocessing.common import (
-    aggregate_features,
-    build_activity_types_dict,
-    build_user_pc_mapping,
-    collect_malicious_ids,
-    combine_and_encode_parquet,
+    build_combined_dataframe,
     create_graph,
     iter_subsessions,
-    process_and_dump_to_parquet,
+    load_user_df_and_malicious_ids,
     save_processed,
-    update_hours,
 )
 from certgnn.utils import get_project_root, load_config
 
@@ -170,14 +165,13 @@ def main() -> None:
     variant_cfg = prep.get("paper_faithful", {}) or {}
     common_cfg = prep.get("common", {}) or {}
 
-    # Backward-compat: accept both nested (preferred) and flat keys.
-    frac_normal_users = variant_cfg.get("frac_normal_users", prep.get("frac_normal_users", 1.0))
-    frac_malicious_users = variant_cfg.get("frac_malicious_users", prep.get("frac_malicious_users", 1.0))
-    dataset_version = common_cfg.get("dataset_version", prep.get("dataset_version", "5.2"))
-    min_session = common_cfg.get("min_session_size", prep.get("min_session_size", 5))
-    max_session = common_cfg.get("max_session_size", prep.get("max_session_size", 50))
-    seed = common_cfg.get("seed", prep.get("seed", 42))
-    keep_local = args.keep_local or variant_cfg.get("keep_local", prep.get("keep_local", False))
+    frac_normal_users = variant_cfg.get("frac_normal_users", 1.0)
+    frac_malicious_users = variant_cfg.get("frac_malicious_users", 1.0)
+    dataset_version = common_cfg.get("dataset_version", "5.2")
+    min_session = common_cfg.get("min_session_size", 5)
+    max_session = common_cfg.get("max_session_size", 50)
+    seed = common_cfg.get("seed", 42)
+    keep_local = args.keep_local or variant_cfg.get("keep_local", False)
 
     extract_dir = root / config["paths"]["extract_dir"]
     processed_dir = root / config["paths"]["processed_dir"]
@@ -185,44 +179,27 @@ def main() -> None:
 
     np.random.seed(seed)
 
-    print("[1/8] Building user-PC mapping...")
-    user_df = build_user_pc_mapping(extract_dir)
-    print(f"  {len(user_df)} users")
-
-    print("[2/8] Collecting malicious activity IDs...")
-    mal_ids = collect_malicious_ids(answers_dir, dataset_version)
-    print(f"  {len(mal_ids)} malicious IDs")
+    user_df, mal_ids = load_user_df_and_malicious_ids(extract_dir, answers_dir, dataset_version)
 
     mal_str = f", frac_malicious={frac_malicious_users}" if frac_malicious_users < 1.0 else ""
-    print(f"[3/8] Selecting users (frac_normal={frac_normal_users}{mal_str})...")
+    print(f"Selecting users (frac_normal={frac_normal_users}{mal_str})...")
     selected = select_users(
         extract_dir, answers_dir, dataset_version,
         frac_normal_users, seed, frac_malicious_users=frac_malicious_users,
     )
 
-    print("[4/8 & 5/8] Extracting features via DuckDB SQL to Parquet...")
-    parquet_path = process_and_dump_to_parquet(
-        extract_dir, processed_dir, user_df, mal_ids, selected,
+    combined, encoder, act_types = build_combined_dataframe(
+        extract_dir, processed_dir, user_df, mal_ids, selected, min_session,
     )
-
-    print("[6/8] Loading from Parquet and encoding...")
-    combined, encoder = combine_and_encode_parquet(parquet_path)
-
-    print("[7/8] Hour merging and feature aggregation...")
-    combined["update_hour"] = combined["hour"]
-    combined, _ = update_hours(combined, min_session)
-    combined["date"] = combined["timestamp"].dt.date
-    combined = aggregate_features(combined)
 
     stream_msg = " (streaming to GDrive)" if args.stream else ""
     if args.stream and keep_local:
         stream_msg += " + keeping local"
-    print(f"[8/8] Creating graphs (saving in chunks){stream_msg}...")
+    print(f"Creating graphs (saving in chunks){stream_msg}...")
 
     est_chunks, est_graphs, total_acts = estimate_chunk_count(combined, min_session, max_session)
     print(f"  → Estimated {est_chunks} chunks (~{est_graphs:,} graphs from {total_acts:,} activities)")
 
-    act_types = build_activity_types_dict(combined)
     total_graphs = create_all_graphs(
         combined, act_types, min_session, max_session, processed_dir,
         stream=args.stream, keep_local=keep_local,

@@ -403,6 +403,58 @@ def iter_subsessions(
 
 
 # ---------------------------------------------------------------------------
+# High-level pipeline orchestration shared by both variants
+# ---------------------------------------------------------------------------
+def load_user_df_and_malicious_ids(
+    extract_dir: Path,
+    answers_dir: Path,
+    dataset_version: str,
+) -> tuple[pd.DataFrame, set]:
+    """Run the variant-independent prologue: user-PC map + malicious IDs."""
+    print("Building user-PC mapping...")
+    user_df = build_user_pc_mapping(extract_dir)
+    print(f"  {len(user_df)} users")
+
+    print("Collecting malicious activity IDs...")
+    mal_ids = collect_malicious_ids(answers_dir, dataset_version)
+    print(f"  {len(mal_ids)} malicious IDs")
+    return user_df, mal_ids
+
+
+def build_combined_dataframe(
+    extract_dir: Path,
+    processed_dir: Path,
+    user_df: pd.DataFrame,
+    malicious_ids: set,
+    selected_users: set | None,
+    min_session_size: int,
+) -> tuple[pd.DataFrame, LabelEncoder, dict[str, set]]:
+    """Run the shared DuckDB → Parquet → encode → aggregate pipeline.
+
+    Returns the ``combined`` DataFrame ready for graph creation, the fitted
+    ``LabelEncoder``, and the activity-types lookup. Identical for both
+    variants — only the upstream user selection differs.
+    """
+    print("Extracting features via DuckDB SQL to Parquet...")
+    parquet_path = process_and_dump_to_parquet(
+        extract_dir, processed_dir, user_df, malicious_ids, selected_users,
+    )
+
+    print("Loading from Parquet and encoding...")
+    combined, encoder = combine_and_encode_parquet(parquet_path)
+    print(f"  {len(combined):,} activities, {len(encoder.classes_)} activity types")
+
+    print("Hour merging and feature aggregation...")
+    combined["update_hour"] = combined["hour"]
+    combined, _ = update_hours(combined, min_session_size)
+    combined["date"] = combined["timestamp"].dt.date
+    combined = aggregate_features(combined)
+
+    activity_types = build_activity_types_dict(combined)
+    return combined, encoder, activity_types
+
+
+# ---------------------------------------------------------------------------
 # Save metadata
 # ---------------------------------------------------------------------------
 def save_processed(
