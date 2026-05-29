@@ -9,7 +9,7 @@ Two variants live here, sharing the upstream DuckDB feature pipeline in
   test stratified per scenario at the user level, chunks are split-prefixed
   on disk so there is no leak from sub-session variants.
 
-Pick a variant via ``configs/config.yaml::preprocessing.variant`` and run::
+Pick a variant via ``preprocessing.variant`` in ``configs/preprocessing.yaml`` and run::
 
     uv run preprocess
     # or, to bypass the dispatcher and pin a variant:

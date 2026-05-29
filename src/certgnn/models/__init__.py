@@ -4,7 +4,7 @@ Adding a new architecture amounts to:
 
 1. Drop a new file under ``certgnn/models/`` that defines an ``nn.Module``.
 2. Register it in ``MODEL_REGISTRY`` below.
-3. Reference it as ``training.model: <name>`` in ``configs/config.yaml``.
+3. Reference it as ``training.model: <name>`` in ``configs/training.yaml``.
 
 The Lightning module instantiates the architecture via ``build_model``,
 so the training loop, callbacks, optimizer, and logging stay shared.

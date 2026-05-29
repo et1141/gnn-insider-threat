@@ -1,6 +1,7 @@
 """Unified training entry point.
 
-Reads ``configs/config.yaml`` and dispatches to:
+Reads the merged ``configs/*.yaml`` (see ``certgnn.utils.load_config``) and
+dispatches to:
 
 * the right DataModule mode (``random_split`` for paper-faithful chunks,
   ``presplit`` for user-level-split chunks),
@@ -14,7 +15,7 @@ the YAML; everything else flows through config.
 
 Examples::
 
-    # Use whatever variant/task/model is in config.yaml
+    # Use whatever variant/task/model is in configs/
     uv run train
 
     # Smoke-test a single batch on the binary task
@@ -162,15 +163,15 @@ def _load_metadata(processed_dir: Path) -> dict:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Unified GNN insider-threat trainer")
     parser.add_argument("--task", choices=["anomaly_aware", "binary"],
-                        help="Override training.task in config.yaml")
-    parser.add_argument("--model", help="Override training.model in config.yaml")
+                        help="Override training.task in configs/training.yaml")
+    parser.add_argument("--model", help="Override training.model in configs/training.yaml")
     parser.add_argument("--max-epochs", type=int, help="Override training.trainer.max_epochs")
     parser.add_argument("--batch-size", type=int, help="Override training.data.batch_size")
     parser.add_argument("--lr", type=float, help="Override training.optimizer.lr")
     parser.add_argument("--fast-dev-run", action="store_true",
                         help="Run a single train/val/test batch end-to-end (Lightning's fast_dev_run)")
     parser.add_argument("--no-wandb", action="store_true",
-                        help="Disable WandB logger even if config.yaml has it.")
+                        help="Disable WandB logger even if configs/training.yaml has it.")
     args = parser.parse_args()
 
     config = load_config()

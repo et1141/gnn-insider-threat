@@ -12,7 +12,7 @@
 
 # RTX 3090 (24 GB VRAM) + 32 GB system RAM + 8 CPUs.
 # Hardware-specific knobs (batch_size, num_workers, prefetch_factor,
-# persistent_workers, precision) are now expressed in configs/config.yaml
+# persistent_workers, precision) are now expressed in configs/training.yaml
 # under training.data and training.trainer. This script only overrides
 # the few flags worth keeping per-job (max_epochs, model/task selection)
 # via train's CLI flags; everything else flows through config.

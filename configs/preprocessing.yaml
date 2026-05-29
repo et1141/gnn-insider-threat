@@ -1,0 +1,34 @@
+# ---------------------------------------------------------------------------
+# Preprocessing — pick a variant; settings live under their own subsection.
+# Both variants share the DuckDB SQL feature pipeline and produce the same
+# 54-dim node features. They differ in user selection and how train/val/test
+# is materialised on disk:
+#
+#   paper_faithful    fractional user selection, one undifferentiated chunk
+#                     stream; the train/val/test split is applied at training
+#                     time by a per-graph RandomSplit.
+#   user_level_split  fixed-count, scenario-balanced selection; the split is
+#                     materialised at preprocessing time as train_/val_/test_
+#                     chunks, eliminating the per-graph leakage of the former.
+# ---------------------------------------------------------------------------
+preprocessing:
+  variant: "paper_faithful"           # paper_faithful | user_level_split
+
+  paper_faithful:
+    frac_normal_users: 0.0085         # Fraction of normal users (0.0-1.0)
+    frac_malicious_users: 0.09        # Fraction of malicious users (99 total in r5.2)
+    keep_local: true                  # Keep .pt files locally after `--stream` push
+
+  user_level_split:
+    num_normal_users: 100
+    num_malicious_users: 90           # max 99 for r5.2
+    balance_malicious_by_scenario: true
+    strict_equal_scenarios: true
+    val_ratio: 0.15
+    test_ratio: 0.15
+
+  common:
+    dataset_version: "5.2"
+    min_session_size: 5
+    max_session_size: 50
+    seed: 42

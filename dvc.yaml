@@ -1,10 +1,22 @@
+# Reproducible pipeline DAG for the insider-threat detector.
+#
+# This is the project's pipeline-clarity layer (the alternative to Kedro that
+# the brief allows): each stage declares its code/data deps and params, so
+# `dvc repro` reruns only what changed, and `dvc dag` shows the flow:
+#
+#     download ──> preprocess_paper_faithful ─┐
+#              └─> preprocess_user_split ─────┴─> train
+#
+# Params are read from the split config files under configs/ (see
+# certgnn.utils.load_config, which merges them at runtime).
+
 stages:
   download:
     cmd: uv run download-data
     deps:
       - src/certgnn/download_data.py
     params:
-      - configs/config.yaml:
+      - configs/paths.yaml:
           - download
           - paths.raw_dir
     outs:
@@ -25,10 +37,11 @@ stages:
       - src/certgnn/data/chunk_store.py
       - data/raw
     params:
-      - configs/config.yaml:
+      - configs/preprocessing.yaml:
           - preprocessing.variant
           - preprocessing.paper_faithful
           - preprocessing.common
+      - configs/paths.yaml:
           - paths
     # processed chunks streamed to GDrive via DvcChunkStore — no local outs
 
@@ -45,10 +58,11 @@ stages:
       - src/certgnn/data/chunk_store.py
       - data/raw
     params:
-      - configs/config.yaml:
+      - configs/preprocessing.yaml:
           - preprocessing.variant
           - preprocessing.user_level_split
           - preprocessing.common
+      - configs/paths.yaml:
           - paths
 
   # Training: dispatched by training.task and training.model. Reads chunks
@@ -69,9 +83,11 @@ stages:
       - configs/chunks_manifest.json
       - data/processed/r5.2
     params:
-      - configs/config.yaml:
+      - configs/training.yaml:
           - training
+      - configs/preprocessing.yaml:
           - preprocessing.variant
+      - configs/paths.yaml:
           - paths.processed_dir
     outs:
       - reports/training/metrics.json
