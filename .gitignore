@@ -8,10 +8,11 @@ data/**
 !data/processed/**/
 !data/processed/**/*.dvc
 
-# Local scratch / reference material (not part of the deliverable)
-notes/
-notes.md
-context/
+# Local scratch / reference material (not part of the deliverable).
+# Anchored to root so docs/notes/ (tracked project notes) is NOT ignored.
+/notes/
+/notes.md
+/context/
 
 # Python / tooling caches
 .venv/
