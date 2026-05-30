@@ -180,12 +180,20 @@ def process_and_dump_to_parquet(
     initialize_duckdb(con)
     parquet_path = processed_dir / "all_features.parquet"
 
+    # Activity-type labels follow the paper (sec. IV-A) and the authors'
+    # reference preprocessing (preprocess_df): logon/device/file keep their
+    # raw activity, but email and http each collapse to a single type, and
+    # File Delete/Copy merge into File Write. This yields 8 distinct activity
+    # types -> 8 * 24 = 192 activity codes (the model's output dimension).
+    # Using the raw email activity ('Send'/'Receive') instead would add a 9th
+    # type and inflate the class space to 216, diverging from the paper.
     sources = [
         ("logon", "logon.csv", LOGON_SQL, "e.activity"),
         ("device", "device.csv", DEVICE_SQL, "e.activity"),
-        ("file", "file.csv", FILE_SQL, "e.activity"),
-        ("email", "email.csv", EMAIL_SQL, "e.activity"),
-        ("http", "http.csv", HTTP_SQL, "'WWW Visit'"),
+        ("file", "file.csv", FILE_SQL,
+         "CASE WHEN e.activity IN ('File Delete', 'File Copy') THEN 'File Write' ELSE e.activity END"),
+        ("email", "email.csv", EMAIL_SQL, "'email'"),
+        ("http", "http.csv", HTTP_SQL, "'http'"),
     ]
 
     for source_name, filename, base_sql, activity_col in sources:
