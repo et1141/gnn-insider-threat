@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -190,7 +191,13 @@ def main() -> None:
         config.setdefault("training", {}).setdefault("wandb", {})["disabled"] = True
 
     root = get_project_root()
-    processed_dir = root / config["paths"]["processed_dir"]
+    # CERTGNN_PROCESSED_DIR lets a launcher point training at a node-local copy
+    # of the processed chunks (see scripts/lab_train.sh). On the lab boxes the
+    # 24 GB of chunks live on a shared NFS server; re-reading them every epoch
+    # stalls the data loader in uninterruptible I/O wait, so we stage to local
+    # disk and override the path here.
+    env_processed = os.environ.get("CERTGNN_PROCESSED_DIR")
+    processed_dir = Path(env_processed) if env_processed else root / config["paths"]["processed_dir"]
     output_dir = root / str(_get(config, "training", "output_dir", default="outputs"))
 
     seed = int(_get(config, "training", "seed", default=42))
