@@ -50,3 +50,18 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/certgnn"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+# Exploratory notebooks and the upstream reference code are not part of the
+# linted deliverable.
+extend-exclude = ["notebooks", "context"]
+
+[tool.ruff.lint]
+# Match ruff's default rule set explicitly so CI behaviour doesn't drift:
+# pycodestyle errors (E4/E7/E9) + pyflakes (F).
+select = ["E4", "E7", "E9", "F"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

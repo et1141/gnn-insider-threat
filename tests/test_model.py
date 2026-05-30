@@ -67,6 +67,37 @@ def test_graph_pooling_forward_pass():
     assert torch.isfinite(logits).all()
 
 
+def test_gcn_lstm_forward_pass():
+    """GCN+Bi-LSTM maps a batch of variable-size graphs to per-graph activity
+    logits of shape [num_graphs, num_activity_classes]."""
+    from certgnn.models import build_model
+
+    num_features, num_classes = 6, 5
+    graph_a = Data(
+        x=torch.randn(4, num_features),
+        edge_index=torch.tensor([[0, 1, 2], [1, 2, 3]], dtype=torch.long),
+    )
+    graph_b = Data(
+        x=torch.randn(2, num_features),
+        edge_index=torch.tensor([[0], [1]], dtype=torch.long),
+    )
+    batch = Batch.from_data_list([graph_a, graph_b])
+
+    model = build_model(
+        "gcn_lstm",
+        num_node_features=num_features,
+        gcn_hidden_dim=8,
+        lstm_hidden_dim=8,
+        num_activity_classes=num_classes,
+        lstm_num_layers=1,
+    )
+    model.eval()
+    logits = model(batch)
+
+    assert logits.shape == (2, num_classes)
+    assert torch.isfinite(logits).all()
+
+
 def test_binary_metrics_helper():
     """Sanity-check that the unified metric helper produces sensible values
     for the same toy case the previous baseline test used."""
