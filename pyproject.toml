@@ -7,9 +7,11 @@ requires-python = ">=3.10"
 dependencies = [
     "pandas",
     "numpy",
-    "torch",
+    # torch is pinned to the cu121 stack: the lab RTX 3060 boxes run driver 535 /
+    # CUDA 12.2, which cannot load cu124/cu126/cu13 builds. 2.5.1+cu121 ships
+    # cuDNN 9 and is the version proven to run on both the lab and dev envs.
+    "torch==2.5.1",
     "torch_geometric",
-    "torchvision>=0.26.0",
     "pytorch-lightning",
     "scikit-learn",
     "tqdm",
@@ -22,7 +24,6 @@ dependencies = [
     "psutil",
     "duckdb>=1.5.2",
     "wandb>=0.25.1",
-    "pytest>=9.0.2",
     "pytest-mock>=3.15.1",
 ]
 
@@ -39,9 +40,12 @@ preprocess-user-split = "certgnn.preprocessing.user_level_split:main"
 download-data = "certgnn.download_data:download_dataset"
 train = "certgnn.train:main"
 
+[tool.uv.sources]
+torch = { index = "pytorch" }
+
 [[tool.uv.index]]
 name = "pytorch"
-url = "https://download.pytorch.org/whl/cu126"
+url = "https://download.pytorch.org/whl/cu121"
 explicit = true
 
 [build-system]
