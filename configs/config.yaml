@@ -25,10 +25,10 @@ preprocessing:
     keep_local: true                  # Keep .pt files locally after `--stream` push
 
   user_level_split:
-    num_normal_users: 100
+    num_normal_users: 15
     num_malicious_users: 90           # max 99 for r5.2
     balance_malicious_by_scenario: true
-    strict_equal_scenarios: true
+    strict_equal_scenarios: false
     val_ratio: 0.15
     test_ratio: 0.15
 
