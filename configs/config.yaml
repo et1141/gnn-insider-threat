@@ -17,7 +17,7 @@ download:
 # is materialised on disk.
 # ---------------------------------------------------------------------------
 preprocessing:
-  variant: "paper_faithful"           # paper_faithful | user_level_split
+  variant: "user_level_split"           # paper_faithful | user_level_split
 
   paper_faithful:
     frac_normal_users: 0.0085         # Fraction of normal users (0.0-1.0)
@@ -45,7 +45,7 @@ preprocessing:
 # ---------------------------------------------------------------------------
 training:
   task: "anomaly_aware"               # anomaly_aware | binary
-  model: "gcn_lstm"                   # gcn_lstm | graph_pool_mlp
+  model: "graph_pool_mlp"                   # gcn_lstm | graph_pool_mlp
   seed: 42
 
   # Per-model kwargs forwarded to MODEL_REGISTRY[model](**kwargs); train.py
@@ -60,6 +60,10 @@ training:
       hidden_dim: 128
       dropout: 0.2
       pooling: "mean_max"
+    gcn_transformer:
+      d_model: 32
+      nhead: 4
+      transformer_num_layers: 2
 
   # Per-task kwargs forwarded to the Lightning task constructor; train.py
   # picks loss_args[task] so changing `task:` doesn't require also editing
@@ -112,5 +116,6 @@ training:
 
   wandb:
     project: "gnn-insider-threat"
-    mode: "offline"                   # offline | online | disabled
-    run_name: null                    # null lets wandb auto-name the run
+    entity: "adrian-walczak119-iiuwr" # null = default from wandb login / WANDB_ENTITY
+    mode: "online"                   # offline | online | disabled
+    run_name: gcn_transformer             # null lets wandb auto-name the run

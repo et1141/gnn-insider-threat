@@ -17,10 +17,15 @@ from typing import Callable
 import torch.nn as nn
 
 from certgnn.models.gcn_lstm import GCN, ActivityPredictor, GCNLSTMInsiderThreat
+from certgnn.models.gcn_transformer import (
+    ActivityTransformerPredictor,
+    GCNTransformerInsiderThreat,
+)
 from certgnn.models.graph_pool_mlp import GraphPoolingMLP
 
 MODEL_REGISTRY: dict[str, Callable[..., nn.Module]] = {
     "gcn_lstm": GCNLSTMInsiderThreat,
+    "gcn_transformer": GCNTransformerInsiderThreat,
     "graph_pool_mlp": GraphPoolingMLP,
 }
 
@@ -40,8 +45,10 @@ def build_model(name: str, **kwargs) -> nn.Module:
 
 __all__ = [
     "ActivityPredictor",
+    "ActivityTransformerPredictor",
     "GCN",
     "GCNLSTMInsiderThreat",
+    "GCNTransformerInsiderThreat",
     "GraphPoolingMLP",
     "MODEL_REGISTRY",
     "build_model",

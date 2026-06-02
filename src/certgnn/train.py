@@ -106,7 +106,7 @@ def _build_module(config: dict, feature_dim: int, num_classes: int):
     # Sensible defaults per architecture if the user didn't pin them.
     if model_name == "graph_pool_mlp":
         model_args.setdefault("input_dim", feature_dim)
-    elif model_name == "gcn_lstm":
+    elif model_name in ("gcn_lstm", "gcn_transformer"):
         model_args.setdefault("num_node_features", feature_dim)
         model_args.setdefault("num_activity_classes", num_classes)
 
@@ -132,12 +132,15 @@ def _build_logger(config: dict) -> Any:
         return None
     try:
         from pytorch_lightning.loggers import WandbLogger
-        return WandbLogger(
-            project=wandb_cfg.get("project", "gnn-insider-threat"),
-            mode=wandb_cfg.get("mode", "offline"),
-            name=wandb_cfg.get("run_name"),
-            log_model=False,
-        )
+        logger_kwargs: dict[str, Any] = {
+            "project": wandb_cfg.get("project", "gnn-insider-threat"),
+            "mode": wandb_cfg.get("mode", "offline"),
+            "name": wandb_cfg.get("run_name"),
+            "log_model": False,
+        }
+        if wandb_cfg.get("entity"):
+            logger_kwargs["entity"] = wandb_cfg["entity"]
+        return WandbLogger(**logger_kwargs)
     except Exception as exc:
         print(f"W&B logger unavailable ({exc}); continuing without experiment logging.")
         return None
