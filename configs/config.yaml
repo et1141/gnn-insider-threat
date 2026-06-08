@@ -44,8 +44,8 @@ preprocessing:
 # callback factory picks the right mode for ModelCheckpoint/EarlyStopping.
 # ---------------------------------------------------------------------------
 training:
-  task: "anomaly_aware"               # anomaly_aware | binary
-  model: "graph_pool_mlp"                   # gcn_lstm | graph_pool_mlp
+  task: "binary"                      # binary = focal loss on y_label; anomaly_aware = paper CE
+  model: "gcn_transformer"            # gcn_lstm | gcn_transformer | graph_pool_mlp
   seed: 42
 
   # Per-model kwargs forwarded to MODEL_REGISTRY[model](**kwargs); train.py
@@ -61,9 +61,11 @@ training:
       dropout: 0.2
       pooling: "mean_max"
     gcn_transformer:
-      d_model: 32
-      nhead: 4
-      transformer_num_layers: 2
+      gcn_hidden_dim: 64
+      d_model: 128
+      nhead: 8
+      dim_feedforward: 512
+      transformer_num_layers: 4
 
   # Per-task kwargs forwarded to the Lightning task constructor; train.py
   # picks loss_args[task] so changing `task:` doesn't require also editing
@@ -73,8 +75,10 @@ training:
       loss_type: "anomaly_aware"        # anomaly_aware | standard
       target_fpr: 0.05
     binary:
+      focal_variant: "fixed_alpha"    # fixed_alpha | dynamic_pos_weight
       gamma: 2.0
-      pos_weight_clamp: 1000.0
+      alpha: 0.9                      # fixed_alpha: weight of the positive (insider) class; tune vs val/pr_auc
+      pos_weight_clamp: 1000.0        # dynamic_pos_weight: upper bound on per-batch n_neg/n_pos
 
   optimizer:
     name: "adam"                      # adam | adamw
@@ -88,8 +92,8 @@ training:
     min_lr: 1.0e-6
 
   data:
-    batch_size: 128
-    num_workers: 0
+    batch_size: 128                   # override via --batch-size
+    num_workers: 0                    # >0 needs worker sharding (presplit dataset shards by worker id)
     max_local_chunks: null            # null = autodetect from RAM/accelerator
     persistent_workers: null
     prefetch_factor: null
@@ -107,7 +111,8 @@ training:
     accelerator: "auto"
     devices: "auto"
     precision: 32                     # 32 | "16-mixed" | "bf16-mixed"
-    deterministic: true
+    deterministic: false              # false lets CUDA pick faster (non-deterministic) kernels
+    gradient_clip_val: 1.0            # clip grad norm; tames focal-loss spikes (null to disable)
 
   callbacks:
     patience: 5
@@ -116,6 +121,6 @@ training:
 
   wandb:
     project: "gnn-insider-threat"
-    entity: "adrian-walczak119-iiuwr" # null = default from wandb login / WANDB_ENTITY
-    mode: "online"                   # offline | online | disabled
-    run_name: gcn_transformer             # null lets wandb auto-name the run
+    entity: null                      # null = default from wandb login / WANDB_ENTITY
+    mode: "offline"                   # offline | online | disabled
+    run_name: gcn_transformer-focal   # null lets wandb auto-name the run

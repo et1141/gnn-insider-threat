@@ -9,10 +9,18 @@ Two task-specific losses live here:
   on attacks. Residual ``p(true_class)`` is then the anomaly signal at
   inference.
 
-* ``focal_loss_with_dynamic_pos_weight`` — binary classification with
-  Lin et al.'s focal loss; class weights are derived from in-batch
-  positive/negative counts so highly imbalanced batches don't drown the
-  malicious gradient.
+* ``focal_loss_fixed_alpha`` — binary classification with Lin et al.'s
+  focal loss and a FIXED class-balancing weight ``alpha``. A constant
+  ``alpha`` keeps the gradient scale independent of how many positives
+  land in a batch — the dominant source of training instability at
+  ~0.2% positive rate. This is the default for the binary task.
+
+* ``focal_loss_with_dynamic_pos_weight`` — the original variant, kept
+  for comparison. It recomputes the positive weight per-batch as
+  ``n_neg / n_pos`` (clamped at ``pos_weight_clamp``); at ~0.2% positives
+  that ratio swings wildly batch-to-batch (often ``0`` vs ``>100``),
+  injecting gradient variance and loss spikes. Selectable via the
+  ``focal_variant`` knob on the binary task.
 """
 
 from __future__ import annotations
@@ -57,6 +65,7 @@ def anomaly_aware_loss(
     Y_prime = Y * (1.0 - omega) + (1.0 - Y) / (num_classes - 1) * omega
 
     log_probs = F.log_softmax(logits, dim=1)
+    
     return -(Y_prime * log_probs).sum(dim=1).mean()
 
 
@@ -65,18 +74,57 @@ def standard_cross_entropy(logits: torch.Tensor, y_act: torch.Tensor) -> torch.T
     return F.cross_entropy(logits, y_act)
 
 
+def focal_loss_fixed_alpha(
+    logits: torch.Tensor,
+    labels: torch.Tensor,
+    gamma: float = 2.0,
+    alpha: float = 0.25,
+) -> torch.Tensor:
+    """Focal loss (Lin et al.) with a fixed class-balancing weight.
+
+    ``alpha`` is the weight applied to the positive class (insider),
+    ``1 - alpha`` to the negative class. Unlike a per-batch ``n_neg/n_pos``
+    weight, ``alpha`` is constant, so the gradient scale no longer depends
+    on how many positives happen to land in a given batch — the dominant
+    source of training instability at ~0.2% positive rate.
+
+    Treat ``alpha`` as a hyperparameter tuned against ``val/pr_auc``:
+    higher ``alpha`` pushes recall up at the cost of precision (more false
+    positives); lower ``alpha`` does the opposite.
+
+    Args:
+        logits: ``[N, 2]`` raw scores.
+        labels: ``[N]`` integer labels in ``{0, 1}``.
+        gamma: Focal-loss focusing parameter.
+        alpha: Weight for the positive class in ``[0, 1]``.
+    """
+    ce = F.cross_entropy(logits, labels, reduction="none")
+    pt = torch.exp(-ce)
+    alpha_t = torch.where(
+        labels == 1,
+        torch.as_tensor(alpha, dtype=logits.dtype, device=logits.device),
+        torch.as_tensor(1.0 - alpha, dtype=logits.dtype, device=logits.device),
+    )
+    focal = alpha_t * (1.0 - pt) ** gamma * ce
+    return focal.mean()
+
+
 def focal_loss_with_dynamic_pos_weight(
     logits: torch.Tensor,
     labels: torch.Tensor,
     gamma: float = 2.0,
     pos_weight_clamp: float = 1000.0,
 ) -> torch.Tensor:
-    """Focal loss with batch-derived positive class weighting.
+    """Focal loss with batch-derived positive class weighting (legacy).
 
     The positive class weight is recomputed per-batch as ``n_neg / n_pos``
     (clamped at ``pos_weight_clamp`` to keep the gradient bounded on
-    near-empty positive batches). The focal modulator
-    ``(1 − p_t)^gamma`` then downweights well-classified examples.
+    near-empty positive batches). The focal modulator ``(1 - p_t)^gamma``
+    then downweights well-classified examples.
+
+    Kept for comparison against :func:`focal_loss_fixed_alpha`. At ~0.2%
+    positive rate the per-batch weight is highly volatile, so prefer the
+    fixed-alpha variant for stable training.
 
     Args:
         logits: ``[N, 2]`` raw scores.
@@ -103,6 +151,7 @@ def focal_loss_with_dynamic_pos_weight(
 
 __all__ = [
     "anomaly_aware_loss",
+    "focal_loss_fixed_alpha",
     "focal_loss_with_dynamic_pos_weight",
     "standard_cross_entropy",
 ]

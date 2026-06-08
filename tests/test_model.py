@@ -136,3 +136,36 @@ def test_build_lightning_module_dispatches_correctly():
         scheduler=None,
     )
     assert isinstance(module, BinaryClassifierLightning)
+
+
+def test_gcn_transformer_binary_training_step():
+    graph_1 = Data(
+        x=torch.randn(3, 4),
+        edge_index=torch.tensor([[0, 1, 1, 2], [1, 0, 2, 1]], dtype=torch.long),
+        y_label=torch.tensor(0),
+    )
+    graph_2 = Data(
+        x=torch.randn(2, 4),
+        edge_index=torch.tensor([[0], [1]], dtype=torch.long),
+        y_label=torch.tensor(1),
+    )
+    batch = Batch.from_data_list([graph_1, graph_2])
+    module = BinaryClassifierLightning(
+        model_name="gcn_transformer",
+        model_args={
+            "num_node_features": 4,
+            "num_activity_classes": 2,
+            "gcn_hidden_dim": 8,
+            "d_model": 8,
+            "nhead": 2,
+            "transformer_num_layers": 1,
+            "dim_feedforward": 16,
+            "dropout": 0.0,
+        },
+        learning_rate=1e-3,
+        weight_decay=0.0,
+        scheduler=None,
+    )
+    loss = module.training_step(batch, 0)
+    assert loss.ndim == 0
+    assert torch.isfinite(loss)

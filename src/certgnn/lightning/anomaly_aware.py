@@ -23,8 +23,8 @@ from certgnn.losses import anomaly_aware_loss, standard_cross_entropy
 class AnomalyAwareLightning(BaseLightningModule):
     """Activity-prediction task with the paper's anomaly-aware soft-label CE."""
 
-    monitor_metric = "val/loss"
-    monitor_mode = "min"
+    monitor_metric = "val/pr_auc"
+    monitor_mode = "max"
 
     def __init__(
         self,
