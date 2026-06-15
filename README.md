@@ -1,4 +1,4 @@
-# Insider Threat Detection with GNN
+# Insider Threat Detection with GNN and Bi-LSTM
 
 Self-supervised graph neural network approach to insider threat detection on the CMU CERT r5.2 dataset.
 The model learns normal user behaviour through masked activity prediction and flags activities with
