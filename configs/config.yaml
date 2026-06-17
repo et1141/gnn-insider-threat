@@ -17,7 +17,7 @@ download:
 # is materialised on disk.
 # ---------------------------------------------------------------------------
 preprocessing:
-  variant: "paper_faithful"           # paper_faithful | user_level_split
+  variant: "user_level_split"           # paper_faithful | user_level_split
 
   paper_faithful:
     frac_normal_users: 0.0085         # Fraction of normal users (0.0-1.0)
@@ -25,10 +25,10 @@ preprocessing:
     keep_local: true                  # Keep .pt files locally after `--stream` push
 
   user_level_split:
-    num_normal_users: 100
+    num_normal_users: 15
     num_malicious_users: 90           # max 99 for r5.2
     balance_malicious_by_scenario: true
-    strict_equal_scenarios: true
+    strict_equal_scenarios: false
     val_ratio: 0.15
     test_ratio: 0.15
 
@@ -44,8 +44,8 @@ preprocessing:
 # callback factory picks the right mode for ModelCheckpoint/EarlyStopping.
 # ---------------------------------------------------------------------------
 training:
-  task: "anomaly_aware"               # anomaly_aware | binary
-  model: "gcn_lstm"                   # gcn_lstm | graph_pool_mlp
+  task: "binary"                      # binary = focal loss on y_label; anomaly_aware = paper CE
+  model: "gcn_transformer"            # gcn_lstm | gcn_transformer | graph_pool_mlp
   seed: 42
 
   # Per-model kwargs forwarded to MODEL_REGISTRY[model](**kwargs); train.py
@@ -60,6 +60,12 @@ training:
       hidden_dim: 128
       dropout: 0.2
       pooling: "mean_max"
+    gcn_transformer:
+      gcn_hidden_dim: 64
+      d_model: 128
+      nhead: 8
+      dim_feedforward: 512
+      transformer_num_layers: 4
 
   # Per-task kwargs forwarded to the Lightning task constructor; train.py
   # picks loss_args[task] so changing `task:` doesn't require also editing
@@ -69,8 +75,10 @@ training:
       loss_type: "anomaly_aware"        # anomaly_aware | standard
       target_fpr: 0.05
     binary:
+      focal_variant: "fixed_alpha"    # fixed_alpha | dynamic_pos_weight
       gamma: 2.0
-      pos_weight_clamp: 1000.0
+      alpha: 0.9                      # fixed_alpha: weight of the positive (insider) class; tune vs val/pr_auc
+      pos_weight_clamp: 1000.0        # dynamic_pos_weight: upper bound on per-batch n_neg/n_pos
 
   optimizer:
     name: "adam"                      # adam | adamw
@@ -84,8 +92,8 @@ training:
     min_lr: 1.0e-6
 
   data:
-    batch_size: 128
-    num_workers: 0
+    batch_size: 128                   # override via --batch-size
+    num_workers: 0                    # >0 needs worker sharding (presplit dataset shards by worker id)
     max_local_chunks: null            # null = autodetect from RAM/accelerator
     persistent_workers: null
     prefetch_factor: null
@@ -103,7 +111,8 @@ training:
     accelerator: "auto"
     devices: "auto"
     precision: 32                     # 32 | "16-mixed" | "bf16-mixed"
-    deterministic: true
+    deterministic: false              # false lets CUDA pick faster (non-deterministic) kernels
+    gradient_clip_val: 1.0            # clip grad norm; tames focal-loss spikes (null to disable)
 
   callbacks:
     patience: 5
@@ -112,5 +121,6 @@ training:
 
   wandb:
     project: "gnn-insider-threat"
+    entity: null                      # null = default from wandb login / WANDB_ENTITY
     mode: "offline"                   # offline | online | disabled
-    run_name: null                    # null lets wandb auto-name the run
+    run_name: gcn_transformer-focal   # null lets wandb auto-name the run

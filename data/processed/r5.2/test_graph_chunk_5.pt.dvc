@@ -1,0 +1,5 @@
+outs:
+- md5: 5c58b9647d59d1a16e467cbb4f37403e
+  size: 2327795401
+  hash: md5
+  path: test_graph_chunk_5.pt

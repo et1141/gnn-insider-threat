@@ -204,6 +204,10 @@ uv run preprocess-user-split --stream
 * `preprocessing.variant` — `paper_faithful` | `user_level_split`
 * `training.task` — `anomaly_aware` (192-class) | `binary` (2-class)
 * `training.model` — `gcn_lstm` | `graph_pool_mlp`
+* `training.loss_args.binary.focal_variant` — `fixed_alpha` (default, constant
+  `alpha` class weight; stable at ~0.2% positives) | `dynamic_pos_weight`
+  (legacy per-batch `n_neg/n_pos` weighting). Tune `alpha` (fixed) or
+  `pos_weight_clamp` (dynamic) accordingly.
 * `training.{model_args, loss_args, optimizer, scheduler, data, trainer, wandb}`
 
 Adding a new architecture: drop `src/certgnn/models/<name>.py`, register

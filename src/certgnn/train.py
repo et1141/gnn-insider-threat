@@ -17,8 +17,8 @@ Examples::
     # Use whatever variant/task/model is in config.yaml
     uv run train
 
-    # Smoke-test a single batch on the binary task
-    uv run train --task binary --model graph_pool_mlp --fast-dev-run
+    # Smoke-test a single batch on the binary task (focal loss)
+    uv run train --task binary --model gcn_transformer --fast-dev-run
 """
 
 from __future__ import annotations
@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Any
 
 import pytorch_lightning as pl
+import torch
 
 from certgnn.callbacks import build_callbacks
 from certgnn.data import InsiderThreatDataModule
@@ -106,9 +107,12 @@ def _build_module(config: dict, feature_dim: int, num_classes: int):
     # Sensible defaults per architecture if the user didn't pin them.
     if model_name == "graph_pool_mlp":
         model_args.setdefault("input_dim", feature_dim)
-    elif model_name == "gcn_lstm":
+    elif model_name in ("gcn_lstm", "gcn_transformer"):
         model_args.setdefault("num_node_features", feature_dim)
-        model_args.setdefault("num_activity_classes", num_classes)
+        # Binary task uses focal loss on y_label (2 logits); anomaly_aware needs
+        # full activity vocabulary from metadata (~192 classes).
+        out_dim = 2 if task == "binary" else num_classes
+        model_args.setdefault("num_activity_classes", out_dim)
 
     opt_cfg = train_cfg.get("optimizer", {}) or {}
     sched_cfg = train_cfg.get("scheduler") or {}
@@ -132,12 +136,15 @@ def _build_logger(config: dict) -> Any:
         return None
     try:
         from pytorch_lightning.loggers import WandbLogger
-        return WandbLogger(
-            project=wandb_cfg.get("project", "gnn-insider-threat"),
-            mode=wandb_cfg.get("mode", "offline"),
-            name=wandb_cfg.get("run_name"),
-            log_model=False,
-        )
+        logger_kwargs: dict[str, Any] = {
+            "project": wandb_cfg.get("project", "gnn-insider-threat"),
+            "mode": wandb_cfg.get("mode", "offline"),
+            "name": wandb_cfg.get("run_name"),
+            "log_model": False,
+        }
+        if wandb_cfg.get("entity"):
+            logger_kwargs["entity"] = wandb_cfg["entity"]
+        return WandbLogger(**logger_kwargs)
     except Exception as exc:
         print(f"W&B logger unavailable ({exc}); continuing without experiment logging.")
         return None
@@ -192,6 +199,9 @@ def main() -> None:
     seed = int(_get(config, "training", "seed", default=42))
     pl.seed_everything(seed, workers=True)
 
+    # Enable TF32 matmuls on Ampere+ GPUs — free throughput, no config knob.
+    torch.set_float32_matmul_precision("high")
+
     metadata = _load_metadata(processed_dir)
     feature_dim = int(metadata["feature_dim"])
     num_classes = int(metadata["num_classes"])
@@ -218,6 +228,7 @@ def main() -> None:
         precision=trainer_cfg.get("precision", 32),
         log_every_n_steps=int(trainer_cfg.get("log_every_n_steps", 50)),
         deterministic=bool(trainer_cfg.get("deterministic", True)),
+        gradient_clip_val=trainer_cfg.get("gradient_clip_val"),
         callbacks=callbacks,
         logger=logger,
         fast_dev_run=args.fast_dev_run,

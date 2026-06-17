@@ -6,6 +6,7 @@ from torch_geometric.data import Batch, Data
 from certgnn.lightning import BinaryClassifierLightning, build_lightning_module
 from certgnn.lightning.metrics import binary_metrics_from_scores
 from certgnn.models import MODEL_REGISTRY, build_model
+from certgnn.models.gcn_transformer import GCNTransformerInsiderThreat
 from certgnn.models.graph_pool_mlp import GraphPoolingMLP
 from certgnn.preprocessing.user_level_split import build_user_splits
 
@@ -27,8 +28,9 @@ def _toy_batch() -> Batch:
 # ---------------------------------------------------------------------------
 # Model registry
 # ---------------------------------------------------------------------------
-def test_model_registry_lists_both_architectures():
+def test_model_registry_lists_architectures():
     assert "gcn_lstm" in MODEL_REGISTRY
+    assert "gcn_transformer" in MODEL_REGISTRY
     assert "graph_pool_mlp" in MODEL_REGISTRY
 
 
@@ -64,6 +66,33 @@ def test_graph_pooling_forward_pass():
     logits = model(batch)
 
     assert logits.shape == (2, 2)
+    assert torch.isfinite(logits).all()
+
+
+def test_gcn_transformer_forward_pass():
+    graph_1 = Data(
+        x=torch.randn(3, 4),
+        edge_index=torch.tensor([[0, 1, 1, 2], [1, 0, 2, 1]], dtype=torch.long),
+    )
+    graph_2 = Data(
+        x=torch.randn(2, 4),
+        edge_index=torch.tensor([[0], [1]], dtype=torch.long),
+    )
+    batch = Batch.from_data_list([graph_1, graph_2])
+    model = GCNTransformerInsiderThreat(
+        num_node_features=4,
+        gcn_hidden_dim=8,
+        d_model=8,
+        nhead=2,
+        transformer_num_layers=1,
+        dim_feedforward=16,
+        num_activity_classes=5,
+        dropout=0.0,
+    )
+
+    logits = model(batch)
+
+    assert logits.shape == (2, 5)
     assert torch.isfinite(logits).all()
 
 
@@ -107,3 +136,36 @@ def test_build_lightning_module_dispatches_correctly():
         scheduler=None,
     )
     assert isinstance(module, BinaryClassifierLightning)
+
+
+def test_gcn_transformer_binary_training_step():
+    graph_1 = Data(
+        x=torch.randn(3, 4),
+        edge_index=torch.tensor([[0, 1, 1, 2], [1, 0, 2, 1]], dtype=torch.long),
+        y_label=torch.tensor(0),
+    )
+    graph_2 = Data(
+        x=torch.randn(2, 4),
+        edge_index=torch.tensor([[0], [1]], dtype=torch.long),
+        y_label=torch.tensor(1),
+    )
+    batch = Batch.from_data_list([graph_1, graph_2])
+    module = BinaryClassifierLightning(
+        model_name="gcn_transformer",
+        model_args={
+            "num_node_features": 4,
+            "num_activity_classes": 2,
+            "gcn_hidden_dim": 8,
+            "d_model": 8,
+            "nhead": 2,
+            "transformer_num_layers": 1,
+            "dim_feedforward": 16,
+            "dropout": 0.0,
+        },
+        learning_rate=1e-3,
+        weight_decay=0.0,
+        scheduler=None,
+    )
+    loss = module.training_step(batch, 0)
+    assert loss.ndim == 0
+    assert torch.isfinite(loss)

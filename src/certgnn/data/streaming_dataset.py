@@ -10,11 +10,15 @@ Two flavours coexist for now (TODO: consider unifying once usage settles):
    yields its graphs, then deletes the local file before moving on. Suited
    for pre-split chunk pipelines where each split is a contiguous stream.
 
-Multi-worker DataLoaders are supported by ``StreamingChunkDataset``:
-``__getstate__``/``__setstate__`` drop the ``threading.Lock`` before pickling
-and recreate it in each worker, so every worker process ends up with its own
-independent LRU cache. Each worker duplicates up to ``max_local_chunks``
-chunks in RAM.
+Multi-worker DataLoaders are supported by both:
+
+* ``StreamingChunkDataset`` — ``__getstate__``/``__setstate__`` drop the
+  ``threading.Lock`` before pickling and recreate it in each worker, so every
+  worker process ends up with its own independent LRU cache. Each worker
+  duplicates up to ``max_local_chunks`` chunks in RAM.
+* ``SequentialChunkDataset`` — ``__iter__`` shards the chunk list by worker id
+  (``worker_id::num_workers``) so workers consume disjoint chunks instead of
+  each replaying the full stream.
 """
 
 import ctypes
@@ -170,6 +174,15 @@ class SequentialChunkDataset(IterableDataset):
 
     def __iter__(self):
         chunks_to_process = list(self.chunk_names)
+
+        # Multi-worker sharding: each worker takes a disjoint slice of chunks
+        # (worker_id::num_workers), so num_workers>0 doesn't duplicate the
+        # dataset. Sharding happens on the sorted list BEFORE shuffling so the
+        # partition is deterministic across epochs.
+        worker_info = torch.utils.data.get_worker_info()
+        if worker_info is not None:
+            chunks_to_process = chunks_to_process[worker_info.id :: worker_info.num_workers]
+
         if self.is_training:
             random.shuffle(chunks_to_process)
 

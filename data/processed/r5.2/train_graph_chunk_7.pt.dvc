@@ -1,5 +1,5 @@
 outs:
-- md5: 5a94aa130a671122718fb66fd0ba6f75
-  size: 3358729943
+- md5: 0e058eaa7d48a582c4070b20c6ee356f
+  size: 2695908395
   hash: md5
   path: train_graph_chunk_7.pt
